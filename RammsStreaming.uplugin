@@ -1,0 +1,30 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "RammsStreaming",
+	"Description": "Binary streaming server for bidirectional camera/sensor data transport between UE and external systems (Python, other UE instances).",
+	"Category": "Other",
+	"CreatedBy": "Finger563",
+	"CreatedByURL": "https://github.com/finger563",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "RammsStreaming",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "CameraCapture",
+			"Enabled": true
+		}
+	]
+}
