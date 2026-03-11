@@ -5,8 +5,9 @@
 #include "CoreMinimal.h"
 #include "RammsStreamProtocol.h"
 #include "RammsStreamServer.h"
-#include "RammsStreamingSubsystem.generated.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+
+#include "RammsStreamingSubsystem.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRammsStreamMessage, int32,
 	ConnectionId,
