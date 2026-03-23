@@ -380,19 +380,29 @@ void URammsStreamSinkComponent::ProcessFrameDataMessage(
 		return;
 	}
 
-	const int32	  Width = static_cast<int32>(Meta->GetNumberField(TEXT("w")));
-	const int32	  Height = static_cast<int32>(Meta->GetNumberField(TEXT("h")));
-	const FString Fmt = Meta->GetStringField(TEXT("fmt")).ToLower();
+	// Safe metadata extraction — missing or non-numeric fields yield 0
+	double WVal = 0.0, HVal = 0.0;
+	Meta->TryGetNumberField(TEXT("w"), WVal);
+	Meta->TryGetNumberField(TEXT("h"), HVal);
+	const int32 Width = static_cast<int32>(WVal);
+	const int32 Height = static_cast<int32>(HVal);
 
-	if (Width <= 0 || Height <= 0)
+	FString Fmt;
+	if (Meta->TryGetStringField(TEXT("fmt"), Fmt))
+	{
+		Fmt = Fmt.ToLower();
+	}
+
+	static constexpr int32 MaxDimension = 16384;
+	if (Width <= 0 || Height <= 0 || Width > MaxDimension || Height > MaxDimension)
 	{
 		UE_LOG(LogRammsStreamSink, Warning,
-			TEXT("Invalid dimensions %dx%d on channel %d"), Width, Height,
-			Channel);
+			TEXT("Invalid dimensions %dx%d on channel %d (max %d)"),
+			Width, Height, Channel, MaxDimension);
 		return;
 	}
 
-	// Default to float32x2 for FrameMotion if no fmt provided
+	// Default format based on message type
 	FString EffectiveFmt = Fmt;
 	if (EffectiveFmt.IsEmpty())
 	{
@@ -410,11 +420,12 @@ void URammsStreamSinkComponent::ProcessFrameDataMessage(
 		return;
 	}
 
-	const int32 ExpectedBytes = Width * Height * FormatInfo.BytesPerPixel;
+	const int64 ExpectedBytes =
+		static_cast<int64>(Width) * static_cast<int64>(Height) * static_cast<int64>(FormatInfo.BytesPerPixel);
 	if (Msg.Payload.Num() < ExpectedBytes)
 	{
 		UE_LOG(LogRammsStreamSink, Warning,
-			TEXT("Payload too small for fmt '%s': %d < %d on channel %d"),
+			TEXT("Payload too small for fmt '%s': %d < %lld on channel %d"),
 			*EffectiveFmt, Msg.Payload.Num(), ExpectedBytes, Channel);
 		return;
 	}
@@ -453,12 +464,22 @@ UTexture2D* URammsStreamSinkComponent::UpdateGenericTexture(int32 ChannelID,
 		ChannelTextures.Add(ChannelID, Tex);
 	}
 
-	const int32 BytesPerPixel = GPixelFormats[Format].BlockBytes;
-	const int32 ByteCount = Width * Height * BytesPerPixel;
+	const int64 BytesPerPixel = static_cast<int64>(GPixelFormats[Format].BlockBytes);
+	const int64 ByteCount =
+		static_cast<int64>(Width) * static_cast<int64>(Height) * BytesPerPixel;
 
 	FTexture2DMipMap& Mip = Tex->GetPlatformData()->Mips[0];
-	void*			  MipData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-	FMemory::Memcpy(MipData, Data, ByteCount);
+	const int64		  BulkSize = Mip.BulkData.GetBulkDataSize();
+	if (BulkSize < ByteCount)
+	{
+		UE_LOG(LogRammsStreamSink, Error,
+			TEXT("Mip bulk data (%lld) smaller than expected (%lld) for channel %d"),
+			BulkSize, ByteCount, ChannelID);
+		return nullptr;
+	}
+
+	void* MipData = Mip.BulkData.Lock(LOCK_READ_WRITE);
+	FMemory::Memcpy(MipData, Data, static_cast<SIZE_T>(ByteCount));
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
 

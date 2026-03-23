@@ -4,6 +4,7 @@
 
 #include "Components/ActorComponent.h"
 #include "CoreMinimal.h"
+#include "PixelFormat.h"
 #include "RammsStreamProtocol.h"
 #include "RammsStreamSinkComponent.generated.h"
 
