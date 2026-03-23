@@ -24,6 +24,9 @@ enum class ERammsStreamMessageType : uint8
 	// Generic image (external → UE)
 	ImageData = 0x10,
 
+	// Generic frame data (bidirectional, pixel format described by "fmt" metadata)
+	FrameData = 0x11,
+
 	// Control messages
 	MetadataOnly = 0xF0,
 	Subscribe = 0xF1,

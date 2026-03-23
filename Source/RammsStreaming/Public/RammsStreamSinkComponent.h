@@ -29,8 +29,7 @@ class RAMMSSTREAMING_API URammsStreamSinkComponent : public UActorComponent
 public:
 	URammsStreamSinkComponent();
 
-	/** Channels to listen for incoming IMAGE_DATA and FRAME_DEPTH. Empty = listen
-	 * to all. */
+	/** Channels to listen for incoming frame data. Empty = listen to all. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming")
 	TArray<int32> ListenChannels;
 
@@ -69,6 +68,10 @@ private:
 	/** Process a FRAME_DEPTH message: float32 → grayscale BGRA8 texture. */
 	void ProcessDepthMessage(const FRammsStreamMessage& Msg);
 
+	/** Process a generic frame (FrameMotion / FrameData) using "fmt" metadata to
+	 * pick pixel format. */
+	void ProcessFrameDataMessage(const FRammsStreamMessage& Msg);
+
 	/** Create or update a UTexture2D from BGRA8 pixel data. */
 	UTexture2D* UpdateTexture(int32 ChannelID, const uint8* Data, int32 Width,
 		int32 Height);
@@ -76,4 +79,8 @@ private:
 	/** Create or update a UTexture2D (R32F) from raw float32 depth data. */
 	UTexture2D* UpdateDepthTexture(int32 ChannelID, const uint8* Data,
 		int32 Width, int32 Height);
+
+	/** Create or update a UTexture2D with an arbitrary pixel format. */
+	UTexture2D* UpdateGenericTexture(int32 ChannelID, const uint8* Data,
+		int32 Width, int32 Height, EPixelFormat Format, bool bIsSRGB);
 };
