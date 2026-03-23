@@ -9,9 +9,10 @@
 
 class UTexture2D;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnStreamFrameReceived, int32,
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnStreamFrameReceived, int32,
 	ChannelID, UTexture2D*, Texture,
-	const FString&, MetadataJson);
+	const FString&, MetadataJson,
+	ERammsStreamMessageType, MessageType);
 
 /**
  * Component that receives image data from RMSS streaming clients and

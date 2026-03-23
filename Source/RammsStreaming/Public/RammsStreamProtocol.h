@@ -36,6 +36,40 @@ enum class ERammsStreamMessageType : uint8
 	Ping = 0xFF,
 };
 
+/** High-level classification of a message type. */
+UENUM(BlueprintType)
+enum class ERammsFrameCategory : uint8
+{
+	/** Renderable image data (RGB, RGBD, depth visualisation, masks). */
+	Visual,
+	/** Non-renderable auxiliary data (motion vectors, point clouds, etc.). */
+	Data,
+	/** Control / metadata-only messages. */
+	Control,
+};
+
+/** Classify a message type into a frame category. */
+inline ERammsFrameCategory GetFrameCategory(ERammsStreamMessageType Type)
+{
+	switch (Type)
+	{
+		case ERammsStreamMessageType::FrameRGB:
+		case ERammsStreamMessageType::FrameDepth:
+		case ERammsStreamMessageType::FrameRGBD:
+		case ERammsStreamMessageType::ImageData:
+			return ERammsFrameCategory::Visual;
+
+		case ERammsStreamMessageType::FrameMotion:
+		case ERammsStreamMessageType::PointCloud:
+		case ERammsStreamMessageType::OctoMap:
+		case ERammsStreamMessageType::FrameData:
+			return ERammsFrameCategory::Data;
+
+		default:
+			return ERammsFrameCategory::Control;
+	}
+}
+
 /** Compression mode stored in the Flags field. */
 UENUM(BlueprintType)
 enum class ERammsStreamCompression : uint8

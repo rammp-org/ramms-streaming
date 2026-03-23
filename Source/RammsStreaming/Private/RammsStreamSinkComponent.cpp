@@ -164,7 +164,7 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 		UpdateTexture(Channel, Msg.Payload.GetData(), Width, Height);
 	if (Tex)
 	{
-		OnFrameReceived.Broadcast(Channel, Tex, MetaStr);
+		OnFrameReceived.Broadcast(Channel, Tex, MetaStr, Msg.Header.MessageType);
 	}
 }
 
@@ -218,7 +218,7 @@ void URammsStreamSinkComponent::ProcessDepthMessage(
 		UpdateDepthTexture(Channel, Msg.Payload.GetData(), Width, Height);
 	if (Tex)
 	{
-		OnFrameReceived.Broadcast(Channel, Tex, MetaStr);
+		OnFrameReceived.Broadcast(Channel, Tex, MetaStr, Msg.Header.MessageType);
 	}
 }
 
@@ -424,7 +424,7 @@ void URammsStreamSinkComponent::ProcessFrameDataMessage(
 		FormatInfo.Format, FormatInfo.bSRGB);
 	if (Tex)
 	{
-		OnFrameReceived.Broadcast(Channel, Tex, MetaStr);
+		OnFrameReceived.Broadcast(Channel, Tex, MetaStr, Msg.Header.MessageType);
 	}
 }
 
