@@ -251,9 +251,16 @@ UTexture2D* URammsStreamSinkComponent::UpdateTexture(int32 ChannelID,
 	// Update pixel data
 	FTexture2DMipMap& Mip = Tex->GetPlatformData()->Mips[0];
 	void*			  MipData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-	FMemory::Memcpy(MipData, Data, Width * Height * 4);
+	const int32		  ByteCount = Width * Height * 4;
+	FMemory::Memcpy(MipData, Data, ByteCount);
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
+
+	// Store CPU-side copy for PGM / CPU consumers
+	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
+	Raw.SetNumUninitialized(ByteCount);
+	FMemory::Memcpy(Raw.GetData(), Data, ByteCount);
+	ChannelPixelFormats.Add(ChannelID, PF_B8G8R8A8);
 
 	return Tex;
 }
@@ -293,6 +300,12 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture(int32 ChannelID,
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
 
+	// Store CPU-side copy
+	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
+	Raw.SetNumUninitialized(ByteCount);
+	FMemory::Memcpy(Raw.GetData(), Data, ByteCount);
+	ChannelPixelFormats.Add(ChannelID, PF_R32_FLOAT);
+
 	return Tex;
 }
 
@@ -300,6 +313,17 @@ UTexture2D* URammsStreamSinkComponent::GetLatestTexture(int32 ChannelID) const
 {
 	const UTexture2D* const* Found = ChannelTextures.Find(ChannelID);
 	return Found ? const_cast<UTexture2D*>(*Found) : nullptr;
+}
+
+const TArray<uint8>* URammsStreamSinkComponent::GetLatestRawData(int32 ChannelID) const
+{
+	return ChannelRawData.Find(ChannelID);
+}
+
+EPixelFormat URammsStreamSinkComponent::GetLatestPixelFormat(int32 ChannelID) const
+{
+	const EPixelFormat* Found = ChannelPixelFormats.Find(ChannelID);
+	return Found ? *Found : PF_Unknown;
 }
 
 // --- Format-driven frame processing (FrameMotion, FrameData, future types) ---
@@ -482,6 +506,12 @@ UTexture2D* URammsStreamSinkComponent::UpdateGenericTexture(int32 ChannelID,
 	FMemory::Memcpy(MipData, Data, static_cast<SIZE_T>(ByteCount));
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
+
+	// Store CPU-side copy
+	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
+	Raw.SetNumUninitialized(static_cast<int32>(ByteCount));
+	FMemory::Memcpy(Raw.GetData(), Data, static_cast<SIZE_T>(ByteCount));
+	ChannelPixelFormats.Add(ChannelID, Format);
 
 	return Tex;
 }
