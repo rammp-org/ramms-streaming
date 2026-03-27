@@ -43,6 +43,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	UTexture2D* GetLatestTexture(int32 ChannelID) const;
 
+	/**
+	 * Copy the latest raw pixel data for a channel into OutData.
+	 * Returns true if data was available, false otherwise.
+	 */
+	bool GetLatestRawData(int32 ChannelID, TArray<uint8>& OutData) const;
+
+	/** Get the pixel format of the latest raw data for a channel. */
+	EPixelFormat GetLatestPixelFormat(int32 ChannelID) const;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -59,6 +68,12 @@ private:
 	/** Cached textures per channel. */
 	UPROPERTY()
 	TMap<int32, UTexture2D*> ChannelTextures;
+
+	/** CPU-side raw frame data per channel (for PGM / CPU consumers). */
+	TMap<int32, TArray<uint8>> ChannelRawData;
+
+	/** Pixel format per channel. */
+	TMap<int32, EPixelFormat> ChannelPixelFormats;
 
 	/** Called when the streaming subsystem receives a message. */
 	void OnNativeStreamMessage(int32 ConnectionId,
