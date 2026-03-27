@@ -43,9 +43,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	UTexture2D* GetLatestTexture(int32 ChannelID) const;
 
-	/** Get a pointer to the latest raw pixel data for a channel (valid until next frame).
-	 *  Returns nullptr if no data received on this channel yet. */
-	const TArray<uint8>* GetLatestRawData(int32 ChannelID) const;
+	/**
+	 * Copy the latest raw pixel data for a channel into OutData.
+	 * Returns true if data was available, false otherwise.
+	 */
+	bool GetLatestRawData(int32 ChannelID, TArray<uint8>& OutData) const;
 
 	/** Get the pixel format of the latest raw data for a channel. */
 	EPixelFormat GetLatestPixelFormat(int32 ChannelID) const;

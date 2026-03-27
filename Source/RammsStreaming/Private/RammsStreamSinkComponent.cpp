@@ -142,26 +142,45 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 		return;
 	}
 
-	// Only support BGRA8 for now
+	// Only support BGRA8 / RGBA8 (RGBA8 is swizzled to BGRA8 below)
 	if (Fmt != TEXT("bgra8") && Fmt != TEXT("rgba8"))
 	{
 		UE_LOG(LogRammsStreamSink, Warning,
-			TEXT("Unsupported format '%s' on channel %d (expected bgra8)"), *Fmt,
+			TEXT("Unsupported format '%s' on channel %d (expected bgra8 or rgba8)"), *Fmt,
 			Channel);
 		return;
 	}
 
-	const int32 ExpectedSize = Width * Height * 4;
-	if (Msg.Payload.Num() < ExpectedSize)
+	const int64 ExpectedSize = static_cast<int64>(Width) * static_cast<int64>(Height) * 4LL;
+	if (ExpectedSize > MAX_int32 || Msg.Payload.Num() < ExpectedSize)
 	{
 		UE_LOG(LogRammsStreamSink, Warning,
-			TEXT("Payload too small: %d < %d on channel %d"), Msg.Payload.Num(),
+			TEXT("Payload size mismatch: have %d, need %lld on channel %d"), Msg.Payload.Num(),
 			ExpectedSize, Channel);
 		return;
 	}
 
+	const uint8*  PixelData = Msg.Payload.GetData();
+	TArray<uint8> SwizzledData;
+
+	// Swizzle RGBA → BGRA so texture format and stored raw bytes are always PF_B8G8R8A8
+	if (Fmt == TEXT("rgba8"))
+	{
+		const int32 NumPixels = Width * Height;
+		SwizzledData.SetNumUninitialized(static_cast<int32>(ExpectedSize));
+		for (int32 i = 0; i < NumPixels; ++i)
+		{
+			const int32 Offset = i * 4;
+			SwizzledData[Offset + 0] = PixelData[Offset + 2]; // B ← R
+			SwizzledData[Offset + 1] = PixelData[Offset + 1]; // G ← G
+			SwizzledData[Offset + 2] = PixelData[Offset + 0]; // R ← B
+			SwizzledData[Offset + 3] = PixelData[Offset + 3]; // A ← A
+		}
+		PixelData = SwizzledData.GetData();
+	}
+
 	UTexture2D* Tex =
-		UpdateTexture(Channel, Msg.Payload.GetData(), Width, Height);
+		UpdateTexture(Channel, PixelData, Width, Height);
 	if (Tex)
 	{
 		OnFrameReceived.Broadcast(Channel, Tex, MetaStr, Msg.Header.MessageType);
@@ -203,9 +222,9 @@ void URammsStreamSinkComponent::ProcessDepthMessage(
 		return;
 	}
 
-	const int32 NumPixels = Width * Height;
-	const int32 ExpectedBytes = NumPixels * static_cast<int32>(sizeof(float));
-	if (Msg.Payload.Num() < ExpectedBytes)
+	const int64 NumPixels = static_cast<int64>(Width) * static_cast<int64>(Height);
+	const int64 ExpectedBytes = NumPixels * static_cast<int64>(sizeof(float));
+	if (ExpectedBytes > MAX_int32 || Msg.Payload.Num() < ExpectedBytes)
 	{
 		UE_LOG(LogRammsStreamSink, Warning,
 			TEXT("Depth payload too small: %d < %d on channel %d"),
@@ -251,15 +270,21 @@ UTexture2D* URammsStreamSinkComponent::UpdateTexture(int32 ChannelID,
 	// Update pixel data
 	FTexture2DMipMap& Mip = Tex->GetPlatformData()->Mips[0];
 	void*			  MipData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-	const int32		  ByteCount = Width * Height * 4;
-	FMemory::Memcpy(MipData, Data, ByteCount);
+	const int64		  ByteCount = static_cast<int64>(Width) * static_cast<int64>(Height) * 4LL;
+	if (ByteCount > MAX_int32 || ByteCount > static_cast<int64>(Mip.BulkData.GetBulkDataSize()))
+	{
+		Mip.BulkData.Unlock();
+		UE_LOG(LogRammsStreamSink, Error, TEXT("Byte count overflow (%lld) for channel %d"), ByteCount, ChannelID);
+		return nullptr;
+	}
+	FMemory::Memcpy(MipData, Data, static_cast<SIZE_T>(ByteCount));
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
 
 	// Store CPU-side copy for PGM / CPU consumers
 	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
-	Raw.SetNumUninitialized(ByteCount);
-	FMemory::Memcpy(Raw.GetData(), Data, ByteCount);
+	Raw.SetNumUninitialized(static_cast<int32>(ByteCount));
+	FMemory::Memcpy(Raw.GetData(), Data, static_cast<SIZE_T>(ByteCount));
 	ChannelPixelFormats.Add(ChannelID, PF_B8G8R8A8);
 
 	return Tex;
@@ -273,7 +298,12 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture(int32 ChannelID,
 	UTexture2D** Existing = ChannelTextures.Find(ChannelID);
 	UTexture2D*	 Tex = Existing ? *Existing : nullptr;
 
-	const int32 ByteCount = Width * Height * static_cast<int32>(sizeof(float));
+	const int64 ByteCount = static_cast<int64>(Width) * static_cast<int64>(Height) * static_cast<int64>(sizeof(float));
+	if (ByteCount > MAX_int32)
+	{
+		UE_LOG(LogRammsStreamSink, Error, TEXT("Depth byte count overflow (%lld) for channel %d"), ByteCount, ChannelID);
+		return nullptr;
+	}
 
 	// Create new R32F texture if dimensions changed or first time
 	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height)
@@ -295,15 +325,21 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture(int32 ChannelID,
 
 	// Update raw float32 pixel data
 	FTexture2DMipMap& Mip = Tex->GetPlatformData()->Mips[0];
-	void*			  MipData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-	FMemory::Memcpy(MipData, Data, ByteCount);
+	const int64		  BulkSize = Mip.BulkData.GetBulkDataSize();
+	if (BulkSize < ByteCount)
+	{
+		UE_LOG(LogRammsStreamSink, Error, TEXT("Depth mip bulk data (%lld) smaller than expected (%lld) for channel %d"), BulkSize, ByteCount, ChannelID);
+		return nullptr;
+	}
+	void* MipData = Mip.BulkData.Lock(LOCK_READ_WRITE);
+	FMemory::Memcpy(MipData, Data, static_cast<SIZE_T>(ByteCount));
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
 
 	// Store CPU-side copy
 	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
-	Raw.SetNumUninitialized(ByteCount);
-	FMemory::Memcpy(Raw.GetData(), Data, ByteCount);
+	Raw.SetNumUninitialized(static_cast<int32>(ByteCount));
+	FMemory::Memcpy(Raw.GetData(), Data, static_cast<SIZE_T>(ByteCount));
 	ChannelPixelFormats.Add(ChannelID, PF_R32_FLOAT);
 
 	return Tex;
@@ -315,9 +351,16 @@ UTexture2D* URammsStreamSinkComponent::GetLatestTexture(int32 ChannelID) const
 	return Found ? const_cast<UTexture2D*>(*Found) : nullptr;
 }
 
-const TArray<uint8>* URammsStreamSinkComponent::GetLatestRawData(int32 ChannelID) const
+bool URammsStreamSinkComponent::GetLatestRawData(int32 ChannelID, TArray<uint8>& OutData) const
 {
-	return ChannelRawData.Find(ChannelID);
+	const TArray<uint8>* Found = ChannelRawData.Find(ChannelID);
+	if (Found && Found->Num() > 0)
+	{
+		OutData = *Found;
+		return true;
+	}
+	OutData.Reset();
+	return false;
 }
 
 EPixelFormat URammsStreamSinkComponent::GetLatestPixelFormat(int32 ChannelID) const
@@ -508,6 +551,11 @@ UTexture2D* URammsStreamSinkComponent::UpdateGenericTexture(int32 ChannelID,
 	Tex->UpdateResource();
 
 	// Store CPU-side copy
+	if (ByteCount > MAX_int32)
+	{
+		UE_LOG(LogRammsStreamSink, Error, TEXT("Raw data too large (%lld bytes) to store for channel %d"), ByteCount, ChannelID);
+		return Tex;
+	}
 	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
 	Raw.SetNumUninitialized(static_cast<int32>(ByteCount));
 	FMemory::Memcpy(Raw.GetData(), Data, static_cast<SIZE_T>(ByteCount));
