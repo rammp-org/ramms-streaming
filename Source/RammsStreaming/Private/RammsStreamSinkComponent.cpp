@@ -169,16 +169,16 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 
 	if (bIsRGB8)
 	{
-		// Expand RGB8 (3 bpp) → BGRA8 (4 bpp): swap R/B, add A=255
+		// Expand RGB8 (3 bpp) → BGRA8 (4 bpp)
 		const int32 NumPixels = Width * Height;
 		ConvertedData.SetNumUninitialized(static_cast<int32>(ConvertedSize));
 		for (int32 i = 0; i < NumPixels; ++i)
 		{
 			const int32 SrcOff = i * 3;
 			const int32 DstOff = i * 4;
-			ConvertedData[DstOff + 0] = PixelData[SrcOff + 2]; // B ← R→B
-			ConvertedData[DstOff + 1] = PixelData[SrcOff + 1]; // G
-			ConvertedData[DstOff + 2] = PixelData[SrcOff + 0]; // R ← B→R
+			ConvertedData[DstOff + 0] = PixelData[SrcOff + 2]; // B ← src B
+			ConvertedData[DstOff + 1] = PixelData[SrcOff + 1]; // G ← src G
+			ConvertedData[DstOff + 2] = PixelData[SrcOff + 0]; // R ← src R
 			ConvertedData[DstOff + 3] = 255;				   // A
 		}
 		PixelData = ConvertedData.GetData();
@@ -191,12 +191,22 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 		for (int32 i = 0; i < NumPixels; ++i)
 		{
 			const int32 Offset = i * 4;
-			ConvertedData[Offset + 0] = PixelData[Offset + 2]; // B ← R
-			ConvertedData[Offset + 1] = PixelData[Offset + 1]; // G ← G
-			ConvertedData[Offset + 2] = PixelData[Offset + 0]; // R ← B
-			ConvertedData[Offset + 3] = PixelData[Offset + 3]; // A ← A
+			ConvertedData[Offset + 0] = PixelData[Offset + 2]; // B ← src B
+			ConvertedData[Offset + 1] = PixelData[Offset + 1]; // G ← src G
+			ConvertedData[Offset + 2] = PixelData[Offset + 0]; // R ← src R
+			ConvertedData[Offset + 3] = PixelData[Offset + 3]; // A ← src A
 		}
 		PixelData = ConvertedData.GetData();
+	}
+
+	// Update metadata to reflect the actual texture format after conversion
+	if (Fmt != TEXT("bgra8"))
+	{
+		Meta->SetStringField(TEXT("fmt"), TEXT("bgra8"));
+		FString					  UpdatedMeta;
+		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&UpdatedMeta, 0);
+		FJsonSerializer::Serialize(Meta.ToSharedRef(), Writer);
+		MetaStr = MoveTemp(UpdatedMeta);
 	}
 
 	UTexture2D* Tex =
@@ -296,7 +306,8 @@ UTexture2D* URammsStreamSinkComponent::UpdateTexture(int32 ChannelID,
 	UTexture2D** Existing = ChannelTextures.Find(ChannelID);
 	UTexture2D*	 Tex = Existing ? *Existing : nullptr;
 
-	// Create new texture if dimensions, or format changed
+	// Create new texture if dimensions or format changed
+	bool bNewTexture = false;
 	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height || Tex->GetPixelFormat() != PF_B8G8R8A8)
 	{
 		Tex = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
@@ -311,7 +322,7 @@ UTexture2D* URammsStreamSinkComponent::UpdateTexture(int32 ChannelID,
 		Tex->Filter = TF_Bilinear;
 		Tex->AddressX = TA_Clamp;
 		Tex->AddressY = TA_Clamp;
-		ChannelTextures.Add(ChannelID, Tex);
+		bNewTexture = true;
 	}
 
 	// Update pixel data
@@ -327,6 +338,12 @@ UTexture2D* URammsStreamSinkComponent::UpdateTexture(int32 ChannelID,
 	FMemory::Memcpy(MipData, Data, static_cast<SIZE_T>(ByteCount));
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
+
+	// Cache texture only after successful update
+	if (bNewTexture)
+	{
+		ChannelTextures.Add(ChannelID, Tex);
+	}
 
 	// Store CPU-side copy for PGM / CPU consumers
 	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
@@ -353,6 +370,7 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture(int32 ChannelID,
 	}
 
 	// Create new R32F texture if dimensions or format changed
+	bool bNewTexture = false;
 	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height || Tex->GetPixelFormat() != PF_R32_FLOAT)
 	{
 		Tex = UTexture2D::CreateTransient(Width, Height, PF_R32_FLOAT);
@@ -367,7 +385,7 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture(int32 ChannelID,
 		Tex->Filter = TF_Bilinear;
 		Tex->AddressX = TA_Clamp;
 		Tex->AddressY = TA_Clamp;
-		ChannelTextures.Add(ChannelID, Tex);
+		bNewTexture = true;
 	}
 
 	// Update raw float32 pixel data
@@ -382,6 +400,12 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture(int32 ChannelID,
 	FMemory::Memcpy(MipData, Data, static_cast<SIZE_T>(ByteCount));
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
+
+	// Cache texture only after successful update
+	if (bNewTexture)
+	{
+		ChannelTextures.Add(ChannelID, Tex);
+	}
 
 	// Store CPU-side copy
 	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
@@ -406,6 +430,7 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture16(int32 ChannelID,
 	}
 
 	// Create G16 (uint16) texture if dimensions or format changed
+	bool bNewTexture = false;
 	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height || Tex->GetPixelFormat() != PF_G16)
 	{
 		Tex = UTexture2D::CreateTransient(Width, Height, PF_G16);
@@ -420,7 +445,7 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture16(int32 ChannelID,
 		Tex->Filter = TF_Bilinear;
 		Tex->AddressX = TA_Clamp;
 		Tex->AddressY = TA_Clamp;
-		ChannelTextures.Add(ChannelID, Tex);
+		bNewTexture = true;
 	}
 
 	// Update raw uint16 pixel data
@@ -435,6 +460,12 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture16(int32 ChannelID,
 	FMemory::Memcpy(MipData, Data, static_cast<SIZE_T>(ByteCount));
 	Mip.BulkData.Unlock();
 	Tex->UpdateResource();
+
+	// Cache texture only after successful update
+	if (bNewTexture)
+	{
+		ChannelTextures.Add(ChannelID, Tex);
+	}
 
 	// Store CPU-side copy
 	TArray<uint8>& Raw = ChannelRawData.FindOrAdd(ChannelID);
