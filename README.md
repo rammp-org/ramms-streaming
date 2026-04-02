@@ -352,10 +352,34 @@ Receives frames from connected clients and creates `UTexture2D` resources.
 | `GetLatestPixelFormat(ChannelID)` | Returns `EPixelFormat` of the latest frame data. |
 
 **Texture creation:** The sink automatically creates or updates per-channel
-textures — BGRA8 for color (`ProcessImageMessage`), R32F for depth
+textures — BGRA8 for color (`ProcessImageMessage`), R32F or G16 for depth
 (`ProcessDepthMessage`), or arbitrary format via `"fmt"` metadata
 (`ProcessFrameDataMessage`). Texture updates happen on the game thread during
 `TickComponent`.
+
+**Format normalization:** The `fmt` metadata field is case-insensitive
+(normalized to lowercase on parse), consistent across all `Process*` methods.
+
+**Color format support:** `ProcessImageMessage` accepts `bgra8`, `rgba8`, and
+`rgb8` formats. RGBA8 and RGB8 are converted to BGRA8 on CPU before texture
+creation (GPU does not support `PF_R8G8B8` on D3D11/D3D12). After conversion,
+the broadcast metadata `fmt` is rewritten to `"bgra8"` so downstream consumers
+see the actual texture format.
+
+**Depth format support:** `ProcessDepthMessage` supports both `float32`/R32F
+(values in cm) and `16uc1`/G16 (uint16, values in mm). Format is auto-detected
+from the `fmt` metadata field.
+
+**Texture reuse safety:** Textures are recreated when pixel format changes (not
+just dimensions), preventing format mismatch when a channel switches between
+e.g. R32F and G16 depth.
+
+**Texture caching:** New textures are only cached in `ChannelTextures` after the
+first successful mip data write, preventing stale entries on creation failure.
+
+**Overflow protection:** Large-frame pixel conversions (RGB8→BGRA8, RGBA8→BGRA8)
+use `int64` arithmetic for size computations to prevent `int32` overflow on
+large images.
 
 ### FRammsStreamServer (FRunnable)
 
