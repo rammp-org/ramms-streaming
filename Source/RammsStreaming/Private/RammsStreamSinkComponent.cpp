@@ -130,9 +130,10 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 		return;
 	}
 
-	const int32	  Width = static_cast<int32>(Meta->GetNumberField(TEXT("w")));
-	const int32	  Height = static_cast<int32>(Meta->GetNumberField(TEXT("h")));
-	const FString Fmt = Meta->GetStringField(TEXT("fmt"));
+	const int32 Width = static_cast<int32>(Meta->GetNumberField(TEXT("w")));
+	const int32 Height = static_cast<int32>(Meta->GetNumberField(TEXT("h")));
+	FString		Fmt = Meta->GetStringField(TEXT("fmt"));
+	Fmt.ToLowerInline();
 
 	if (Width <= 0 || Height <= 0)
 	{
@@ -154,7 +155,8 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 
 	const int32 BytesPerPixel = bIsRGB8 ? 3 : 4;
 	const int64 ExpectedSize = static_cast<int64>(Width) * static_cast<int64>(Height) * BytesPerPixel;
-	if (ExpectedSize > MAX_int32 || Msg.Payload.Num() < ExpectedSize)
+	const int64 ConvertedSize = static_cast<int64>(Width) * static_cast<int64>(Height) * 4LL;
+	if (ExpectedSize > MAX_int32 || ConvertedSize > MAX_int32 || Msg.Payload.Num() < ExpectedSize)
 	{
 		UE_LOG(LogRammsStreamSink, Warning,
 			TEXT("Payload size mismatch: have %d, need %lld on channel %d"), Msg.Payload.Num(),
@@ -168,9 +170,8 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 	if (bIsRGB8)
 	{
 		// Expand RGB8 (3 bpp) → BGRA8 (4 bpp): swap R/B, add A=255
-		const int64 NumPixels64 = static_cast<int64>(Width) * static_cast<int64>(Height);
-		ConvertedData.SetNumUninitialized(static_cast<int32>(NumPixels64 * 4));
-		const int32 NumPixels = static_cast<int32>(NumPixels64);
+		const int32 NumPixels = Width * Height;
+		ConvertedData.SetNumUninitialized(static_cast<int32>(ConvertedSize));
 		for (int32 i = 0; i < NumPixels; ++i)
 		{
 			const int32 SrcOff = i * 3;
@@ -185,9 +186,8 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 	else if (Fmt == TEXT("rgba8"))
 	{
 		// Swizzle RGBA → BGRA
-		const int64 NumPixels64 = static_cast<int64>(Width) * static_cast<int64>(Height);
-		ConvertedData.SetNumUninitialized(static_cast<int32>(NumPixels64 * 4));
-		const int32 NumPixels = static_cast<int32>(NumPixels64);
+		const int32 NumPixels = Width * Height;
+		ConvertedData.SetNumUninitialized(static_cast<int32>(ConvertedSize));
 		for (int32 i = 0; i < NumPixels; ++i)
 		{
 			const int32 Offset = i * 4;
