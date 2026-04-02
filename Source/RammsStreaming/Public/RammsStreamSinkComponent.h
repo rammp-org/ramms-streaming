@@ -97,6 +97,10 @@ private:
 	UTexture2D* UpdateDepthTexture(int32 ChannelID, const uint8* Data,
 		int32 Width, int32 Height);
 
+	/** Create or update a UTexture2D (G16 / uint16) from raw uint16 mm depth data. */
+	UTexture2D* UpdateDepthTexture16(int32 ChannelID, const uint8* Data,
+		int32 Width, int32 Height);
+
 	/** Create or update a UTexture2D with an arbitrary pixel format. */
 	UTexture2D* UpdateGenericTexture(int32 ChannelID, const uint8* Data,
 		int32 Width, int32 Height, EPixelFormat Format, bool bIsSRGB);
