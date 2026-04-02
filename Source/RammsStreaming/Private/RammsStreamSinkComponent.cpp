@@ -243,6 +243,7 @@ void URammsStreamSinkComponent::ProcessDepthMessage(
 	// Detect depth encoding from metadata
 	FString Fmt;
 	Meta->TryGetStringField(TEXT("fmt"), Fmt);
+	Fmt.ToLowerInline();
 	const bool bIsUint16 = (Fmt == TEXT("16uc1") || Fmt == TEXT("uint16") || Fmt == TEXT("mono16"));
 
 	if (bIsUint16)
