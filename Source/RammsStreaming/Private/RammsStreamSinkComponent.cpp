@@ -168,8 +168,9 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 	if (bIsRGB8)
 	{
 		// Expand RGB8 (3 bpp) → BGRA8 (4 bpp): swap R/B, add A=255
-		const int32 NumPixels = Width * Height;
-		ConvertedData.SetNumUninitialized(NumPixels * 4);
+		const int64 NumPixels64 = static_cast<int64>(Width) * static_cast<int64>(Height);
+		ConvertedData.SetNumUninitialized(static_cast<int32>(NumPixels64 * 4));
+		const int32 NumPixels = static_cast<int32>(NumPixels64);
 		for (int32 i = 0; i < NumPixels; ++i)
 		{
 			const int32 SrcOff = i * 3;
@@ -184,8 +185,9 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 	else if (Fmt == TEXT("rgba8"))
 	{
 		// Swizzle RGBA → BGRA
-		const int32 NumPixels = Width * Height;
-		ConvertedData.SetNumUninitialized(NumPixels * 4);
+		const int64 NumPixels64 = static_cast<int64>(Width) * static_cast<int64>(Height);
+		ConvertedData.SetNumUninitialized(static_cast<int32>(NumPixels64 * 4));
+		const int32 NumPixels = static_cast<int32>(NumPixels64);
 		for (int32 i = 0; i < NumPixels; ++i)
 		{
 			const int32 Offset = i * 4;
@@ -294,8 +296,8 @@ UTexture2D* URammsStreamSinkComponent::UpdateTexture(int32 ChannelID,
 	UTexture2D** Existing = ChannelTextures.Find(ChannelID);
 	UTexture2D*	 Tex = Existing ? *Existing : nullptr;
 
-	// Create new texture if dimensions changed or first time
-	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height)
+	// Create new texture if dimensions, or format changed
+	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height || Tex->GetPixelFormat() != PF_B8G8R8A8)
 	{
 		Tex = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
 		if (!Tex)
@@ -350,8 +352,8 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture(int32 ChannelID,
 		return nullptr;
 	}
 
-	// Create new R32F texture if dimensions changed or first time
-	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height)
+	// Create new R32F texture if dimensions or format changed
+	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height || Tex->GetPixelFormat() != PF_R32_FLOAT)
 	{
 		Tex = UTexture2D::CreateTransient(Width, Height, PF_R32_FLOAT);
 		if (!Tex)
@@ -403,8 +405,8 @@ UTexture2D* URammsStreamSinkComponent::UpdateDepthTexture16(int32 ChannelID,
 		return nullptr;
 	}
 
-	// Create G16 (uint16) texture if dimensions changed or first time
-	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height)
+	// Create G16 (uint16) texture if dimensions or format changed
+	if (!Tex || Tex->GetSizeX() != Width || Tex->GetSizeY() != Height || Tex->GetPixelFormat() != PF_G16)
 	{
 		Tex = UTexture2D::CreateTransient(Width, Height, PF_G16);
 		if (!Tex)
