@@ -283,7 +283,7 @@ void FRammsStreamServer::Tick()
 	for (auto& [ConnId, Msg] : InboundMessages)
 	{
 		UE_LOG(
-			LogRammsStream, Log,
+			LogRammsStream, Verbose,
 			TEXT("RMSS: Dispatching msg type=0x%02X ch=%d payload=%d from conn %u"),
 			static_cast<uint8>(Msg.Header.MessageType), Msg.Header.ChannelID,
 			Msg.Header.PayloadLen, ConnId);
