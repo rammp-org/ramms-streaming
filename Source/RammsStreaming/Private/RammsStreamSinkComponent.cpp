@@ -10,6 +10,64 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogRammsStreamSink, Log, All);
 
+// --- Format resolution (used by ProcessImageMessage and ProcessFrameDataMessage) ---
+
+namespace
+{
+	struct FResolvedFormat
+	{
+		EPixelFormat Format;
+		int32		 BytesPerPixel;
+		bool		 bSRGB;
+	};
+
+	/** Map "fmt" metadata string → pixel format.  Returns false if unknown. */
+	bool ResolvePixelFormat(const FString& Fmt, FResolvedFormat& Out)
+	{
+		if (Fmt == TEXT("bgra8") || Fmt == TEXT("rgba8"))
+		{
+			Out = { PF_B8G8R8A8, 4, true };
+			return true;
+		}
+		if (Fmt == TEXT("float32") || Fmt == TEXT("r32f") || Fmt == TEXT("depth"))
+		{
+			Out = { PF_R32_FLOAT, 4, false };
+			return true;
+		}
+		if (Fmt == TEXT("float32x2") || Fmt == TEXT("rg32f"))
+		{
+			Out = { PF_G32R32F, 8, false };
+			return true;
+		}
+		if (Fmt == TEXT("float32x4") || Fmt == TEXT("rgba32f"))
+		{
+			Out = { PF_A32B32G32R32F, 16, false };
+			return true;
+		}
+		if (Fmt == TEXT("float16") || Fmt == TEXT("r16f"))
+		{
+			Out = { PF_R16F, 2, false };
+			return true;
+		}
+		if (Fmt == TEXT("float16x2") || Fmt == TEXT("rg16f"))
+		{
+			Out = { PF_G16R16F, 4, false };
+			return true;
+		}
+		if (Fmt == TEXT("float16x4") || Fmt == TEXT("rgba16f"))
+		{
+			Out = { PF_FloatRGBA, 8, false };
+			return true;
+		}
+		if (Fmt == TEXT("r8") || Fmt == TEXT("gray8") || Fmt == TEXT("mono8"))
+		{
+			Out = { PF_G8, 1, false };
+			return true;
+		}
+		return false;
+	}
+} // namespace
+
 URammsStreamSinkComponent::URammsStreamSinkComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -145,11 +203,37 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 
 	// Support BGRA8, RGBA8 (swizzled to BGRA8), and RGB8 (expanded to BGRA8)
 	const bool bIsRGB8 = (Fmt == TEXT("rgb8"));
-	if (Fmt != TEXT("bgra8") && Fmt != TEXT("rgba8") && !bIsRGB8)
+	const bool bIsLegacyColor = (Fmt == TEXT("bgra8") || Fmt == TEXT("rgba8") || bIsRGB8);
+
+	if (!bIsLegacyColor)
 	{
-		UE_LOG(LogRammsStreamSink, Warning,
-			TEXT("Unsupported format '%s' on channel %d (expected bgra8, rgba8, or rgb8)"), *Fmt,
-			Channel);
+		// Try the generic format resolver (mono8, r8, gray8, float formats, etc.)
+		FResolvedFormat FormatInfo;
+		if (!ResolvePixelFormat(Fmt, FormatInfo))
+		{
+			UE_LOG(LogRammsStreamSink, Warning,
+				TEXT("Unsupported format '%s' on channel %d"), *Fmt, Channel);
+			return;
+		}
+
+		const int64 ExpectedBytes =
+			static_cast<int64>(Width) * static_cast<int64>(Height)
+			* static_cast<int64>(FormatInfo.BytesPerPixel);
+		if (ExpectedBytes > MAX_int32 || Msg.Payload.Num() < ExpectedBytes)
+		{
+			UE_LOG(LogRammsStreamSink, Warning,
+				TEXT("Payload size mismatch for fmt '%s': have %d, need %lld on channel %d"),
+				*Fmt, Msg.Payload.Num(), ExpectedBytes, Channel);
+			return;
+		}
+
+		UTexture2D* Tex = UpdateGenericTexture(
+			Channel, Msg.Payload.GetData(), Width, Height,
+			FormatInfo.Format, FormatInfo.bSRGB);
+		if (Tex)
+		{
+			OnFrameReceived.Broadcast(Channel, Tex, MetaStr, Msg.Header.MessageType);
+		}
 		return;
 	}
 
@@ -501,62 +585,6 @@ EPixelFormat URammsStreamSinkComponent::GetLatestPixelFormat(int32 ChannelID) co
 }
 
 // --- Format-driven frame processing (FrameMotion, FrameData, future types) ---
-
-namespace
-{
-	struct FResolvedFormat
-	{
-		EPixelFormat Format;
-		int32		 BytesPerPixel;
-		bool		 bSRGB;
-	};
-
-	/** Map "fmt" metadata string → pixel format.  Returns false if unknown. */
-	bool ResolvePixelFormat(const FString& Fmt, FResolvedFormat& Out)
-	{
-		if (Fmt == TEXT("bgra8") || Fmt == TEXT("rgba8"))
-		{
-			Out = { PF_B8G8R8A8, 4, true };
-			return true;
-		}
-		if (Fmt == TEXT("float32") || Fmt == TEXT("r32f") || Fmt == TEXT("depth"))
-		{
-			Out = { PF_R32_FLOAT, 4, false };
-			return true;
-		}
-		if (Fmt == TEXT("float32x2") || Fmt == TEXT("rg32f"))
-		{
-			Out = { PF_G32R32F, 8, false };
-			return true;
-		}
-		if (Fmt == TEXT("float32x4") || Fmt == TEXT("rgba32f"))
-		{
-			Out = { PF_A32B32G32R32F, 16, false };
-			return true;
-		}
-		if (Fmt == TEXT("float16") || Fmt == TEXT("r16f"))
-		{
-			Out = { PF_R16F, 2, false };
-			return true;
-		}
-		if (Fmt == TEXT("float16x2") || Fmt == TEXT("rg16f"))
-		{
-			Out = { PF_G16R16F, 4, false };
-			return true;
-		}
-		if (Fmt == TEXT("float16x4") || Fmt == TEXT("rgba16f"))
-		{
-			Out = { PF_FloatRGBA, 8, false };
-			return true;
-		}
-		if (Fmt == TEXT("r8") || Fmt == TEXT("gray8"))
-		{
-			Out = { PF_G8, 1, false };
-			return true;
-		}
-		return false;
-	}
-} // namespace
 
 void URammsStreamSinkComponent::ProcessFrameDataMessage(
 	const FRammsStreamMessage& Msg)
