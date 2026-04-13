@@ -17,7 +17,6 @@ namespace
 	struct FResolvedFormat
 	{
 		EPixelFormat Format;
-		int32		 BytesPerPixel;
 		bool		 bSRGB;
 	};
 
@@ -28,42 +27,42 @@ namespace
 	{
 		if (Fmt == TEXT("bgra8"))
 		{
-			Out = { PF_B8G8R8A8, 4, true };
+			Out = { PF_B8G8R8A8, true };
 			return true;
 		}
 		if (Fmt == TEXT("float32") || Fmt == TEXT("r32f") || Fmt == TEXT("depth"))
 		{
-			Out = { PF_R32_FLOAT, 4, false };
+			Out = { PF_R32_FLOAT, false };
 			return true;
 		}
 		if (Fmt == TEXT("float32x2") || Fmt == TEXT("rg32f"))
 		{
-			Out = { PF_G32R32F, 8, false };
+			Out = { PF_G32R32F, false };
 			return true;
 		}
 		if (Fmt == TEXT("float32x4") || Fmt == TEXT("rgba32f"))
 		{
-			Out = { PF_A32B32G32R32F, 16, false };
+			Out = { PF_A32B32G32R32F, false };
 			return true;
 		}
 		if (Fmt == TEXT("float16") || Fmt == TEXT("r16f"))
 		{
-			Out = { PF_R16F, 2, false };
+			Out = { PF_R16F, false };
 			return true;
 		}
 		if (Fmt == TEXT("float16x2") || Fmt == TEXT("rg16f"))
 		{
-			Out = { PF_G16R16F, 4, false };
+			Out = { PF_G16R16F, false };
 			return true;
 		}
 		if (Fmt == TEXT("float16x4") || Fmt == TEXT("rgba16f"))
 		{
-			Out = { PF_FloatRGBA, 8, false };
+			Out = { PF_FloatRGBA, false };
 			return true;
 		}
 		if (Fmt == TEXT("r8") || Fmt == TEXT("gray8") || Fmt == TEXT("mono8"))
 		{
-			Out = { PF_G8, 1, false };
+			Out = { PF_G8, false };
 			return true;
 		}
 		return false;
@@ -218,8 +217,7 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 			return;
 		}
 
-		// Validate payload using the same byte-size source that UpdateGenericTexture
-		// uses (GPixelFormats[].BlockBytes), avoiding divergence with FormatInfo.BytesPerPixel.
+		// Validate payload using GPixelFormats[].BlockBytes — the same source UpdateGenericTexture uses.
 		const int64 BlockBytes = static_cast<int64>(GPixelFormats[FormatInfo.Format].BlockBytes);
 		const int64 ExpectedBytes =
 			static_cast<int64>(Width) * static_cast<int64>(Height) * BlockBytes;
