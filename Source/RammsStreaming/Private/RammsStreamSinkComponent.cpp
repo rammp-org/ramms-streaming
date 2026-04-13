@@ -21,10 +21,12 @@ namespace
 		bool		 bSRGB;
 	};
 
-	/** Map "fmt" metadata string → pixel format.  Returns false if unknown. */
+	/** Map "fmt" metadata string → pixel format.  Returns false if unknown.
+	 *  Note: "rgba8" is intentionally excluded — it requires an RGBA→BGRA swizzle
+	 *  that ProcessImageMessage handles; the generic path would render with swapped channels. */
 	bool ResolvePixelFormat(const FString& Fmt, FResolvedFormat& Out)
 	{
-		if (Fmt == TEXT("bgra8") || Fmt == TEXT("rgba8"))
+		if (Fmt == TEXT("bgra8"))
 		{
 			Out = { PF_B8G8R8A8, 4, true };
 			return true;
@@ -216,9 +218,11 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 			return;
 		}
 
+		// Validate payload using the same byte-size source that UpdateGenericTexture
+		// uses (GPixelFormats[].BlockBytes), avoiding divergence with FormatInfo.BytesPerPixel.
+		const int64 BlockBytes = static_cast<int64>(GPixelFormats[FormatInfo.Format].BlockBytes);
 		const int64 ExpectedBytes =
-			static_cast<int64>(Width) * static_cast<int64>(Height)
-			* static_cast<int64>(FormatInfo.BytesPerPixel);
+			static_cast<int64>(Width) * static_cast<int64>(Height) * BlockBytes;
 		if (ExpectedBytes > MAX_int32 || Msg.Payload.Num() < ExpectedBytes)
 		{
 			UE_LOG(LogRammsStreamSink, Warning,
@@ -646,8 +650,9 @@ void URammsStreamSinkComponent::ProcessFrameDataMessage(
 		return;
 	}
 
+	const int64 BlockBytes = static_cast<int64>(GPixelFormats[FormatInfo.Format].BlockBytes);
 	const int64 ExpectedBytes =
-		static_cast<int64>(Width) * static_cast<int64>(Height) * static_cast<int64>(FormatInfo.BytesPerPixel);
+		static_cast<int64>(Width) * static_cast<int64>(Height) * BlockBytes;
 	if (Msg.Payload.Num() < ExpectedBytes)
 	{
 		UE_LOG(LogRammsStreamSink, Warning,
