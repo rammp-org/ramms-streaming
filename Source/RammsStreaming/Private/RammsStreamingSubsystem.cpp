@@ -66,8 +66,12 @@ bool URammsStreamingSubsystem::StartServer(int32 Port, int32 MaxClients)
 		MakeUnique<FRammsStreamServer>(static_cast<uint16>(Port), MaxClients);
 
 	// Apply queue size configuration
-	Server->DefaultMaxInboundQueueSize = MaxInboundQueueSize;
-	Server->DefaultMaxOutboundQueueSize = MaxOutboundQueueSize;
+	const int32 SanitizedMaxInboundQueueSize =
+		(MaxInboundQueueSize > 0) ? MaxInboundQueueSize : 1;
+	const int32 SanitizedMaxOutboundQueueSize =
+		(MaxOutboundQueueSize > 0) ? MaxOutboundQueueSize : 1;
+	Server->DefaultMaxInboundQueueSize = SanitizedMaxInboundQueueSize;
+	Server->DefaultMaxOutboundQueueSize = SanitizedMaxOutboundQueueSize;
 
 	// Wire up inbound message delegate
 	Server->OnMessageReceived.BindLambda(
