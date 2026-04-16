@@ -146,8 +146,31 @@ void URammsStreamSinkComponent::TickComponent(
 		Swap(ToProcess, PendingFrames);
 	}
 
-	for (const auto& Msg : ToProcess)
+	// Keep only the latest frame per (channel, message-type) pair to avoid
+	// redundant texture uploads when the sender is faster than the frame rate.
+	// Different message types on the same channel (e.g., RGB + Depth) are
+	// kept independently.
+	TMap<uint64, int32> LatestPerKey; // packed (channel<<32|type) → index
+	LatestPerKey.Reserve(ToProcess.Num());
+	for (int32 i = 0; i < ToProcess.Num(); ++i)
 	{
+		const uint64 Key =
+			(static_cast<uint64>(ToProcess[i].Header.ChannelID) << 32)
+			| static_cast<uint64>(ToProcess[i].Header.MessageType);
+		LatestPerKey.FindOrAdd(Key) = i;
+	}
+
+	TArray<int32> LatestIndices;
+	LatestIndices.Reserve(LatestPerKey.Num());
+	for (const auto& Pair : LatestPerKey)
+	{
+		LatestIndices.Add(Pair.Value);
+	}
+	LatestIndices.Sort();
+
+	for (const int32 Idx : LatestIndices)
+	{
+		const auto& Msg = ToProcess[Idx];
 		switch (Msg.Header.MessageType)
 		{
 			case ERammsStreamMessageType::FrameDepth:

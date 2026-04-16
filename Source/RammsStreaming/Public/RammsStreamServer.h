@@ -45,6 +45,10 @@ public:
 	int32  GetMaxClients() const { return MaxClients; }
 	int32  GetConnectionCount() const;
 
+	/** Queue size limits applied to new connections. */
+	int32 DefaultMaxInboundQueueSize = 64;
+	int32 DefaultMaxOutboundQueueSize = 3;
+
 	// ── Frame / message distribution ─────────────────────────────────
 	/**
 	 * Broadcast a message to all clients subscribed to its channel.

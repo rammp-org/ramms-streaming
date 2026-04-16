@@ -61,6 +61,13 @@ public:
 	/** Dequeue one inbound message. Returns false if empty. Thread-safe. */
 	bool DequeueInbound(FRammsStreamMessage& OutMessage);
 
+	/** Drain all currently buffered inbound messages into OutMessages. Thread-safe. */
+	void DrainInbound(TArray<FRammsStreamMessage>& OutMessages);
+
+	/** Maximum number of inbound messages to buffer before dropping oldest.
+	 *  0 = unlimited (legacy behaviour). */
+	TAtomic<int32> MaxInboundQueueSize = 0;
+
 	// ── FRunnable (receive thread) ───────────────────────────────────
 	virtual bool   Init() override;
 	virtual uint32 Run() override;
@@ -80,12 +87,24 @@ private:
 	TArray<uint8>		   RecvBuffer;
 	static constexpr int32 RECV_CHUNK_SIZE = 65536;
 
+	/** Minimum allocated RecvBuffer size before shrink logic is considered. */
+	static constexpr int32 RECV_BUFFER_SHRINK_THRESHOLD = 4 * RECV_CHUNK_SIZE; // 256 KB
+
 	// Thread-safe queues
 	FCriticalSection						OutboundLock;
 	TArray<TSharedRef<FRammsStreamMessage>> OutboundQueue;
 
+	// Inbound ring buffer — O(1) enqueue, dequeue and drop-oldest.
+	// When MaxInboundQueueSize > 0 the ring is pre-allocated to that
+	// capacity and never grows.  When 0 (unbounded) it falls back to
+	// plain TArray append semantics.
 	FCriticalSection			InboundLock;
-	TArray<FRammsStreamMessage> InboundQueue;
+	TArray<FRammsStreamMessage> InboundRing;
+	int32						InboundHead = 0;  // index of oldest message
+	int32						InboundCount = 0; // number of valid messages
+
+	/** Ensure the ring backing store has room for at least Cap elements. */
+	void EnsureInboundRingCapacity(int32 Cap);
 
 	/** Send raw bytes, handling partial sends. Returns false on error. */
 	bool SendAll(const uint8* Data, int32 Len);

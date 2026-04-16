@@ -220,6 +220,8 @@ void FRammsStreamServer::OnClientConnected(FSocket* ClientSocket)
 	const uint32					   ConnId = NextConnectionId++;
 	TSharedPtr<FRammsStreamConnection> Conn =
 		MakeShared<FRammsStreamConnection>(ClientSocket, ConnId);
+	Conn->MaxInboundQueueSize = DefaultMaxInboundQueueSize;
+	Conn->MaxOutboundQueueSize = DefaultMaxOutboundQueueSize;
 
 	// Start the recv thread BEFORE adding to the map to avoid a race with
 	// CleanupDisconnected() — Start() sets bConnected=true, and Cleanup
@@ -267,12 +269,16 @@ void FRammsStreamServer::Tick()
 
 	// Collect inbound messages from all connections
 	TArray<TPair<uint32, FRammsStreamMessage>> InboundMessages;
+	TArray<FRammsStreamMessage> ConnMessages;
 	{
 		FScopeLock Lock(&ConnectionsLock);
 		for (auto& Pair : Connections)
 		{
-			FRammsStreamMessage Msg;
-			while (Pair.Value.IsValid() && Pair.Value->DequeueInbound(Msg))
+			if (!Pair.Value.IsValid())
+				continue;
+
+			Pair.Value->DrainInbound(ConnMessages);
+			for (auto& Msg : ConnMessages)
 			{
 				InboundMessages.Emplace(Pair.Key, MoveTemp(Msg));
 			}
