@@ -126,9 +126,15 @@ uint32 FRammsStreamConnection::Run()
 				break; // incomplete message, wait for more data
 			}
 
-			// Enqueue the parsed message
+			// Enqueue the parsed message (drop oldest if over capacity)
 			{
 				FScopeLock Lock(&InboundLock);
+				if (MaxInboundQueueSize > 0 && InboundQueue.Num() >= MaxInboundQueueSize)
+				{
+					// Drop oldest messages to stay within budget
+					const int32 Excess = InboundQueue.Num() - MaxInboundQueueSize + 1;
+					InboundQueue.RemoveAt(0, Excess);
+				}
 				InboundQueue.Add(MoveTemp(Msg));
 			}
 
@@ -145,6 +151,13 @@ uint32 FRammsStreamConnection::Run()
 					Remaining);
 			}
 			RecvBuffer.SetNum(Remaining, EAllowShrinking::No);
+
+			// Periodically reclaim memory when the buffer is far larger than needed
+			if (RecvBuffer.GetAllocatedSize() > RECV_BUFFER_SHRINK_THRESHOLD
+				&& RecvBuffer.Num() < static_cast<int32>(RecvBuffer.GetAllocatedSize() / 4))
+			{
+				RecvBuffer.Shrink();
+			}
 		}
 	}
 
@@ -217,8 +230,15 @@ bool FRammsStreamConnection::DequeueInbound(FRammsStreamMessage& OutMessage)
 	if (InboundQueue.Num() == 0)
 		return false;
 	OutMessage = MoveTemp(InboundQueue[0]);
-	InboundQueue.RemoveAt(0);
+	InboundQueue.RemoveAt(0, EAllowShrinking::No);
 	return true;
+}
+
+void FRammsStreamConnection::DrainInbound(
+	TArray<FRammsStreamMessage>& OutMessages)
+{
+	FScopeLock Lock(&InboundLock);
+	Swap(OutMessages, InboundQueue);
 }
 
 // ---------------------------------------------------------------------------

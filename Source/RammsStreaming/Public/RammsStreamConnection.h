@@ -61,6 +61,13 @@ public:
 	/** Dequeue one inbound message. Returns false if empty. Thread-safe. */
 	bool DequeueInbound(FRammsStreamMessage& OutMessage);
 
+	/** Dequeue all inbound messages at once (swap). Thread-safe. */
+	void DrainInbound(TArray<FRammsStreamMessage>& OutMessages);
+
+	/** Maximum number of inbound messages to buffer before dropping oldest.
+	 *  0 = unlimited (legacy behaviour). */
+	int32 MaxInboundQueueSize = 64;
+
 	// ── FRunnable (receive thread) ───────────────────────────────────
 	virtual bool   Init() override;
 	virtual uint32 Run() override;
@@ -79,6 +86,9 @@ private:
 	// Receive buffer for accumulating partial messages
 	TArray<uint8>		   RecvBuffer;
 	static constexpr int32 RECV_CHUNK_SIZE = 65536;
+
+	/** Shrink RecvBuffer when its capacity exceeds this multiple of actual usage. */
+	static constexpr int32 RECV_BUFFER_SHRINK_THRESHOLD = 4 * RECV_CHUNK_SIZE; // 256 KB
 
 	// Thread-safe queues
 	FCriticalSection						OutboundLock;

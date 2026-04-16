@@ -271,8 +271,11 @@ void FRammsStreamServer::Tick()
 		FScopeLock Lock(&ConnectionsLock);
 		for (auto& Pair : Connections)
 		{
-			FRammsStreamMessage Msg;
-			while (Pair.Value.IsValid() && Pair.Value->DequeueInbound(Msg))
+			if (!Pair.Value.IsValid())
+				continue;
+			TArray<FRammsStreamMessage> ConnMessages;
+			Pair.Value->DrainInbound(ConnMessages);
+			for (auto& Msg : ConnMessages)
 			{
 				InboundMessages.Emplace(Pair.Key, MoveTemp(Msg));
 			}
