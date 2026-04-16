@@ -61,7 +61,7 @@ public:
 	/** Dequeue one inbound message. Returns false if empty. Thread-safe. */
 	bool DequeueInbound(FRammsStreamMessage& OutMessage);
 
-	/** Dequeue all inbound messages at once (swap). Thread-safe. */
+	/** Drain all currently buffered inbound messages into OutMessages. Thread-safe. */
 	void DrainInbound(TArray<FRammsStreamMessage>& OutMessages);
 
 	/** Maximum number of inbound messages to buffer before dropping oldest.
