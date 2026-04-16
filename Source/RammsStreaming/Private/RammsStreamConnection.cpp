@@ -131,9 +131,10 @@ uint32 FRammsStreamConnection::Run()
 				FScopeLock Lock(&InboundLock);
 				if (MaxInboundQueueSize > 0 && InboundQueue.Num() >= MaxInboundQueueSize)
 				{
-					// Drop oldest messages to stay within budget
+					// Drop oldest messages to stay within budget without shrinking,
+					// to avoid capacity oscillation under sustained traffic.
 					const int32 Excess = InboundQueue.Num() - MaxInboundQueueSize + 1;
-					InboundQueue.RemoveAt(0, Excess);
+					InboundQueue.RemoveAt(0, Excess, EAllowShrinking::No);
 				}
 				InboundQueue.Add(MoveTemp(Msg));
 			}
