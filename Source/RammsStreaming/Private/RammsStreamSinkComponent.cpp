@@ -151,6 +151,7 @@ void URammsStreamSinkComponent::TickComponent(
 	// Different message types on the same channel (e.g., RGB + Depth) are
 	// kept independently.
 	TMap<uint64, int32> LatestPerKey; // packed (channel<<32|type) → index
+	LatestPerKey.Reserve(ToProcess.Num());
 	for (int32 i = 0; i < ToProcess.Num(); ++i)
 	{
 		const uint64 Key =
