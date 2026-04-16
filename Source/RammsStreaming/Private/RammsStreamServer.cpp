@@ -269,13 +269,15 @@ void FRammsStreamServer::Tick()
 
 	// Collect inbound messages from all connections
 	TArray<TPair<uint32, FRammsStreamMessage>> InboundMessages;
+	TArray<FRammsStreamMessage> ConnMessages;
 	{
 		FScopeLock Lock(&ConnectionsLock);
 		for (auto& Pair : Connections)
 		{
 			if (!Pair.Value.IsValid())
 				continue;
-			TArray<FRammsStreamMessage> ConnMessages;
+
+			ConnMessages.Reset();
 			Pair.Value->DrainInbound(ConnMessages);
 			for (auto& Msg : ConnMessages)
 			{
