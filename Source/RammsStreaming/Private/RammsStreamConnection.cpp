@@ -239,6 +239,7 @@ void FRammsStreamConnection::DrainInbound(
 	TArray<FRammsStreamMessage>& OutMessages)
 {
 	FScopeLock Lock(&InboundLock);
+	OutMessages.Reset();
 	Swap(OutMessages, InboundQueue);
 }
 
