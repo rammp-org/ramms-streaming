@@ -64,10 +64,11 @@ public:
 	// ── Connection queue configuration ──────────────────────────────
 
 	/** Maximum inbound messages queued per connection before oldest are dropped.
-	 *  Applied to new connections when the server accepts them. 0 = unlimited. */
+	 *  Applied to new connections when the server accepts them.
+	 *  0 = unlimited (legacy behavior, preserved by default). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming",
 		meta = (ClampMin = "0"))
-	int32 MaxInboundQueueSize = 64;
+	int32 MaxInboundQueueSize = 0;
 
 	/** Maximum outbound messages buffered per connection before oldest are dropped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming",
