@@ -66,7 +66,7 @@ public:
 
 	/** Maximum number of inbound messages to buffer before dropping oldest.
 	 *  0 = unlimited (legacy behaviour). */
-	int32 MaxInboundQueueSize = 64;
+	int32 MaxInboundQueueSize = 0;
 
 	// ── FRunnable (receive thread) ───────────────────────────────────
 	virtual bool   Init() override;
