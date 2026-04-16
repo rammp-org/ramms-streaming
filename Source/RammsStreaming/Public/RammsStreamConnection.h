@@ -87,7 +87,7 @@ private:
 	TArray<uint8>		   RecvBuffer;
 	static constexpr int32 RECV_CHUNK_SIZE = 65536;
 
-	/** Shrink RecvBuffer when its capacity exceeds this multiple of actual usage. */
+	/** Minimum allocated RecvBuffer size before shrink logic is considered. */
 	static constexpr int32 RECV_BUFFER_SHRINK_THRESHOLD = 4 * RECV_CHUNK_SIZE; // 256 KB
 
 	// Thread-safe queues
