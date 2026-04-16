@@ -129,14 +129,31 @@ uint32 FRammsStreamConnection::Run()
 			// Enqueue the parsed message (drop oldest if over capacity)
 			{
 				FScopeLock Lock(&InboundLock);
-				if (MaxInboundQueueSize > 0 && InboundQueue.Num() >= MaxInboundQueueSize)
+
+				const int32 Cap = MaxInboundQueueSize.Load();
+				if (Cap > 0)
 				{
-					// Drop oldest messages to stay within budget without shrinking,
-					// to avoid capacity oscillation under sustained traffic.
-					const int32 Excess = InboundQueue.Num() - MaxInboundQueueSize + 1;
-					InboundQueue.RemoveAt(0, Excess, EAllowShrinking::No);
+					// Bounded ring-buffer path — O(1) drop and enqueue.
+					EnsureInboundRingCapacity(Cap);
+
+					if (InboundCount >= Cap)
+					{
+						// Drop the oldest (Cap - 1) keeps one slot for the new msg.
+						const int32 Excess = InboundCount - Cap + 1;
+						InboundHead = (InboundHead + Excess) % InboundRing.Num();
+						InboundCount -= Excess;
+					}
+
+					const int32 Tail = (InboundHead + InboundCount) % InboundRing.Num();
+					InboundRing[Tail] = MoveTemp(Msg);
+					++InboundCount;
 				}
-				InboundQueue.Add(MoveTemp(Msg));
+				else
+				{
+					// Unbounded — plain append (no dropping).
+					InboundRing.Add(MoveTemp(Msg));
+					++InboundCount;
+				}
 			}
 
 			Offset += Consumed;
@@ -228,10 +245,26 @@ int32 FRammsStreamConnection::FlushOutbound()
 bool FRammsStreamConnection::DequeueInbound(FRammsStreamMessage& OutMessage)
 {
 	FScopeLock Lock(&InboundLock);
-	if (InboundQueue.Num() == 0)
+	if (InboundCount == 0)
 		return false;
-	OutMessage = MoveTemp(InboundQueue[0]);
-	InboundQueue.RemoveAt(0, EAllowShrinking::No);
+
+	OutMessage = MoveTemp(InboundRing[InboundHead]);
+
+	// For bounded mode, advance the head index in the ring.
+	// For unbounded mode, InboundRing is used as a plain array so we
+	// must still remove the element (but DrainInbound via Swap is the
+	// typical hot-path consumer, so this is fine).
+	const int32 Cap = MaxInboundQueueSize.Load();
+	if (Cap > 0)
+	{
+		InboundHead = (InboundHead + 1) % InboundRing.Num();
+	}
+	else
+	{
+		InboundRing.RemoveAt(0, EAllowShrinking::No);
+		// InboundHead stays 0 in unbounded mode.
+	}
+	--InboundCount;
 	return true;
 }
 
@@ -240,7 +273,68 @@ void FRammsStreamConnection::DrainInbound(
 {
 	FScopeLock Lock(&InboundLock);
 	OutMessages.Reset();
-	Swap(OutMessages, InboundQueue);
+
+	if (InboundCount == 0)
+		return;
+
+	const int32 Cap = MaxInboundQueueSize.Load();
+	if (Cap > 0)
+	{
+		// Ring buffer — copy items in order, then reset head/count.
+		const int32 RingSize = InboundRing.Num();
+		OutMessages.Reserve(InboundCount);
+		for (int32 i = 0; i < InboundCount; ++i)
+		{
+			OutMessages.Add(MoveTemp(InboundRing[(InboundHead + i) % RingSize]));
+		}
+		InboundHead = 0;
+		InboundCount = 0;
+	}
+	else
+	{
+		// Unbounded — O(1) swap.
+		Swap(OutMessages, InboundRing);
+		InboundHead = 0;
+		InboundCount = 0;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Inbound ring buffer
+// ---------------------------------------------------------------------------
+
+void FRammsStreamConnection::EnsureInboundRingCapacity(int32 Cap)
+{
+	// Already the right size — nothing to do.
+	if (InboundRing.Num() == Cap)
+		return;
+
+	if (InboundCount == 0)
+	{
+		// Empty — just resize and reset head.
+		InboundRing.SetNum(Cap);
+		InboundHead = 0;
+		return;
+	}
+
+	// Non-empty ring being resized (capacity changed at runtime).
+	// Linearize existing items into a new array.
+	const int32 OldSize = InboundRing.Num();
+	const int32 Keep = FMath::Min(InboundCount, Cap);
+
+	TArray<FRammsStreamMessage> Tmp;
+	Tmp.SetNum(Cap);
+
+	// Copy the *newest* Keep items (drop oldest if shrinking).
+	const int32 Skip = InboundCount - Keep;
+	for (int32 i = 0; i < Keep; ++i)
+	{
+		Tmp[i] = MoveTemp(InboundRing[(InboundHead + Skip + i) % OldSize]);
+	}
+
+	InboundRing = MoveTemp(Tmp);
+	InboundHead = 0;
+	InboundCount = Keep;
 }
 
 // ---------------------------------------------------------------------------
