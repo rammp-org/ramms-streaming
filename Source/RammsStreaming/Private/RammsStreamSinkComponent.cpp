@@ -159,7 +159,15 @@ void URammsStreamSinkComponent::TickComponent(
 		LatestPerKey.FindOrAdd(Key) = i;
 	}
 
-	for (auto& [Key, Idx] : LatestPerKey)
+	TArray<int32> LatestIndices;
+	LatestIndices.Reserve(LatestPerKey.Num());
+	for (const auto& Pair : LatestPerKey)
+	{
+		LatestIndices.Add(Pair.Value);
+	}
+	LatestIndices.Sort();
+
+	for (const int32 Idx : LatestIndices)
 	{
 		const auto& Msg = ToProcess[Idx];
 		switch (Msg.Header.MessageType)
