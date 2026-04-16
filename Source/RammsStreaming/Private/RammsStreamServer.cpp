@@ -277,7 +277,6 @@ void FRammsStreamServer::Tick()
 			if (!Pair.Value.IsValid())
 				continue;
 
-			ConnMessages.Reset();
 			Pair.Value->DrainInbound(ConnMessages);
 			for (auto& Msg : ConnMessages)
 			{
