@@ -305,6 +305,35 @@ Fields are optional and vary by message type. The `"format"` field is used by
 extrinsics are forwarded from the CameraCapture subsystem by the source
 component.
 
+#### Depth dimensions
+
+A camera with separate depth intrinsics captures depth at its own resolution,
+so **depth is not always `w` x `h`**. Two keys carry the depth grid:
+
+| Key | Meaning |
+|---|---|
+| `depth_w`, `depth_h` | The grid the depth payload is actually in. |
+
+Which message carries what:
+
+- **`FrameDepth`** — the payload is depth alone, so `w`/`h` describe the depth
+  grid, and `depth_w`/`depth_h` repeat them explicitly.
+- **`FrameRGBD`** — `w`/`h` describe the RGB half (what the JPEG or BGRA block
+  decodes to) and `depth_w`/`depth_h` describe the depth half. Reshaping the
+  depth half by `w`/`h` is wrong whenever the two differ.
+
+**Reshape depth by `depth_w`/`depth_h` when they are present**, falling back to
+`w`/`h` when they are not — that fallback is what every sender produced before
+these keys existed, and it remains correct for the common case where the two
+grids match. The addition is backwards compatible: the binary header is
+unchanged, so `VERSION` stays at 1, and a client that ignores the new keys
+behaves exactly as it did.
+
+Before these keys existed the source component labelled the depth payload with
+the colour dimensions, so a client that trusted `w`/`h` reshaped depth by the
+wrong size — a truncated or skewed image at best, and a read past the end of
+the payload for a client that did not check the length.
+
 ---
 
 ## Components
@@ -320,8 +349,8 @@ Central manager for the streaming server and frame broadcasting.
 | `IsServerRunning()` | Returns `true` if the server is accepting connections. |
 | `GetConnectionCount()` | Number of active client connections. |
 | `BroadcastRGBFrame(Channel, PixelData, W, H, Metadata)` | Push a BGRA8 RGB frame to all subscribers on a channel. |
-| `BroadcastDepthFrame(Channel, DepthData, W, H, Metadata)` | Push a float32 depth frame. |
-| `BroadcastRGBDFrame(Channel, PixelData, DepthData, W, H, Metadata)` | Push a fused RGBD frame. |
+| `BroadcastDepthFrame(Channel, DepthData, W, H, Metadata, DepthW, DepthH)` | Push a float32 depth frame. `DepthW`/`DepthH` default to 0, meaning "same as W/H". |
+| `BroadcastRGBDFrame(Channel, PixelData, DepthData, W, H, Metadata, DepthW, DepthH)` | Push a fused RGBD frame. `W`/`H` describe the RGB half; `DepthW`/`DepthH` the depth half. |
 | `OnMessageReceived` | Blueprint delegate fired when an inbound message arrives. |
 | `OnNativeMessageReceived` | Native (C++) delegate with full `FRammsStreamMessage` payload. |
 | `bEnableCompression` | Global toggle — JPEG for RGB, LZ4 for depth. |

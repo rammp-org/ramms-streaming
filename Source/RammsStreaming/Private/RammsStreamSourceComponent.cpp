@@ -82,6 +82,11 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 	// Build metadata JSON
 	FString MetaJson = BuildMetadataJson(*Data);
 
+	// Depth may be on its own grid; carry those dimensions rather than letting a
+	// client assume the colour ones. Zero means "no depth captured".
+	const int32 DepthW = Data->DepthWidth > 0 ? Data->DepthWidth : Data->Width;
+	const int32 DepthH = Data->DepthHeight > 0 ? Data->DepthHeight : Data->Height;
+
 	if (bStreamRGBD && Data->ImageData.Num() > 0 && Data->DepthData.Num() > 0)
 	{
 		// Combined RGBD
@@ -92,7 +97,7 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 
 		TArray<float> DepthCopy = Data->DepthData;
 		StreamSub->BroadcastRGBDFrame(ChannelID, RgbBytes, DepthCopy, Data->Width,
-			Data->Height, MetaJson);
+			Data->Height, MetaJson, DepthW, DepthH);
 	}
 	else
 	{
@@ -110,8 +115,8 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 		{
 			// Use ChannelID + 100 for depth so clients can subscribe independently
 			TArray<float> DepthCopy = Data->DepthData;
-			StreamSub->BroadcastDepthFrame(ChannelID + 100, DepthCopy, Data->Width,
-				Data->Height, MetaJson);
+			StreamSub->BroadcastDepthFrame(ChannelID + 100, DepthCopy, DepthW,
+				DepthH, MetaJson, DepthW, DepthH);
 		}
 	}
 }
@@ -123,6 +128,11 @@ URammsStreamSourceComponent::BuildMetadataJson(const FCaptureData& Data) const
 
 	Json->SetNumberField(TEXT("w"), Data.Width);
 	Json->SetNumberField(TEXT("h"), Data.Height);
+	if (Data.DepthWidth > 0 && Data.DepthHeight > 0)
+	{
+		Json->SetNumberField(TEXT("depth_w"), Data.DepthWidth);
+		Json->SetNumberField(TEXT("depth_h"), Data.DepthHeight);
+	}
 	Json->SetNumberField(TEXT("frame"), Data.FrameNumber);
 	Json->SetNumberField(TEXT("timestamp"), Data.Timestamp);
 	Json->SetStringField(TEXT("camera"), Data.CameraID.ToString());

@@ -6,6 +6,9 @@
 #include "ImageCore.h"
 #include "ImageUtils.h"
 #include "Misc/Compression.h"
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "RammsStreamServer.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogRammsStreamSub, Log, All);
@@ -147,6 +150,53 @@ void URammsStreamingSubsystem::BroadcastMessage(
 	Server->BroadcastToSubscribers(Msg);
 }
 
+namespace
+{
+	/**
+	 * Add fields to a caller-supplied metadata JSON instead of replacing it.
+	 *
+	 * The RGBD path used to rebuild the metadata with Printf whenever
+	 * compression was on, which silently dropped everything the source component
+	 * had put there -- intrinsics, extrinsics, camera id, timestamp -- so a
+	 * compressed stream carried strictly less than an uncompressed one. Parsing
+	 * and adding keeps the caller's fields and lets the transport describe the
+	 * payload it actually produced.
+	 */
+	FString MergeStreamMetadata(const FString& BaseJson, const TMap<FString, double>& Numbers, const TMap<FString, FString>& Strings)
+	{
+		TSharedPtr<FJsonObject> Obj;
+		if (!BaseJson.IsEmpty())
+		{
+			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(BaseJson);
+			if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
+			{
+				// Unparseable metadata is the caller's business, not something to
+				// throw away silently; start fresh but say so.
+				UE_LOG(LogTemp, Warning, TEXT("[RammsStreaming] Could not parse supplied metadata; emitting transport fields only"));
+				Obj.Reset();
+			}
+		}
+		if (!Obj.IsValid())
+		{
+			Obj = MakeShared<FJsonObject>();
+		}
+
+		for (const TPair<FString, double>& N : Numbers)
+		{
+			Obj->SetNumberField(N.Key, N.Value);
+		}
+		for (const TPair<FString, FString>& S : Strings)
+		{
+			Obj->SetStringField(S.Key, S.Value);
+		}
+
+		FString					  Out;
+		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+		FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+		return Out;
+	}
+} // namespace
+
 void URammsStreamingSubsystem::BroadcastRGBFrame(int32 ChannelID,
 	const TArray<uint8>&							   PixelData,
 	int32 Width, int32 Height,
@@ -195,24 +245,29 @@ void URammsStreamingSubsystem::BroadcastRGBFrame(int32 ChannelID,
 
 void URammsStreamingSubsystem::BroadcastDepthFrame(
 	int32 ChannelID, const TArray<float>& DepthData, int32 Width, int32 Height,
-	const FString& MetadataJson)
+	const FString& MetadataJson, int32 DepthWidth, int32 DepthHeight)
 {
+	// This message carries depth and nothing else, so "w"/"h" describe the depth
+	// grid. Callers forwarding a camera frame used to pass the COLOUR size here,
+	// which told every client to reshape a depth buffer by the wrong dimensions.
+	const int32 PayloadW = DepthWidth > 0 ? DepthWidth : Width;
+	const int32 PayloadH = DepthHeight > 0 ? DepthHeight : Height;
+
 	auto Msg = MakeShared<FRammsStreamMessage>();
 	Msg->Header.MessageType = ERammsStreamMessageType::FrameDepth;
 	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
 	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
 	Msg->Header.Timestamp = FDateTime::UtcNow().ToUnixTimestamp() * 1000000LL + FDateTime::UtcNow().GetMillisecond() * 1000LL;
 
-	FString Meta = MetadataJson;
-	if (Meta.IsEmpty())
-	{
-		Meta = FString::Printf(
-			TEXT("{\"w\":%d,\"h\":%d,\"fmt\":\"float32\",\"unit\":\"cm\"}"), Width,
-			Height);
-	}
-
 	// Reinterpret float array as bytes
 	const int32 ByteCount = DepthData.Num() * sizeof(float);
+
+	FString Meta = MergeStreamMetadata(MetadataJson,
+		{ { TEXT("w"), (double)PayloadW },
+			{ TEXT("h"), (double)PayloadH },
+			{ TEXT("depth_w"), (double)PayloadW },
+			{ TEXT("depth_h"), (double)PayloadH } },
+		{ { TEXT("fmt"), TEXT("float32") }, { TEXT("unit"), TEXT("cm") } });
 
 	// Optional LZ4 compression
 	if (bEnableCompression)
@@ -246,8 +301,14 @@ void URammsStreamingSubsystem::BroadcastDepthFrame(
 void URammsStreamingSubsystem::BroadcastRGBDFrame(
 	int32 ChannelID, const TArray<uint8>& PixelData,
 	const TArray<float>& DepthData, int32 Width, int32 Height,
-	const FString& MetadataJson)
+	const FString& MetadataJson, int32 DepthWidth, int32 DepthHeight)
 {
+	// "w"/"h" describe the RGB half, which is what a client decodes the JPEG or
+	// BGRA block with. Depth may be on a different grid entirely, so it gets its
+	// own dimensions rather than borrowing these.
+	const int32 DepthW = DepthWidth > 0 ? DepthWidth : Width;
+	const int32 DepthH = DepthHeight > 0 ? DepthHeight : Height;
+
 	auto Msg = MakeShared<FRammsStreamMessage>();
 	Msg->Header.MessageType = ERammsStreamMessageType::FrameRGBD;
 	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
@@ -256,15 +317,18 @@ void URammsStreamingSubsystem::BroadcastRGBDFrame(
 
 	const int32 DepthBytes = DepthData.Num() * sizeof(float);
 
-	FString Meta = MetadataJson;
-	if (Meta.IsEmpty())
-	{
-		Meta = FString::Printf(
-			TEXT("{\"w\":%d,\"h\":%d,\"rgb_fmt\":\"bgra8\",\"depth_fmt\":"
-				 "\"float32\",")
-				TEXT("\"rgb_size\":%d,\"depth_size\":%d,\"depth_unit\":\"cm\"}"),
-			Width, Height, PixelData.Num(), DepthBytes);
-	}
+	// Transport fields are ADDED to whatever the caller supplied, never swapped
+	// for it, so intrinsics and extrinsics survive regardless of compression.
+	FString Meta = MergeStreamMetadata(MetadataJson,
+		{ { TEXT("w"), (double)Width },
+			{ TEXT("h"), (double)Height },
+			{ TEXT("depth_w"), (double)DepthW },
+			{ TEXT("depth_h"), (double)DepthH },
+			{ TEXT("rgb_size"), (double)PixelData.Num() },
+			{ TEXT("depth_size"), (double)DepthBytes } },
+		{ { TEXT("rgb_fmt"), TEXT("bgra8") },
+			{ TEXT("depth_fmt"), TEXT("float32") },
+			{ TEXT("depth_unit"), TEXT("cm") } });
 
 	// For RGBD, compress RGB portion with JPEG and depth with LZ4
 	// Both halves are concatenated; metadata carries their sizes
@@ -281,15 +345,15 @@ void URammsStreamingSubsystem::BroadcastRGBDFrame(
 			Msg->Header.Flags |=
 				FRammsStreamHeader::FLAG_HIGH_PRIORITY; // signal mixed compression
 
-			// Override metadata with compressed sizes
-			Meta = FString::Printf(
-				TEXT("{\"w\":%d,\"h\":%d,\"rgb_fmt\":\"bgra8\",\"depth_fmt\":"
-					 "\"float32\",")
-					TEXT("\"rgb_size\":%d,\"depth_size\":%d,\"depth_unit\":\"cm\",")
-						TEXT("\"rgb_comp\":\"jpeg\",\"depth_comp\":\"lz4\",\"rgb_raw_"
-							 "size\":%d,\"depth_raw_size\":%d}"),
-				Width, Height, RgbCompressed.Num(), DepthCompressed.Num(),
-				PixelData.Num(), DepthBytes);
+			// Restate the sizes now that they are the COMPRESSED ones, and say
+			// how each half was compressed. This used to rebuild the whole JSON
+			// and so dropped every field the caller had set.
+			Meta = MergeStreamMetadata(Meta,
+				{ { TEXT("rgb_size"), (double)RgbCompressed.Num() },
+					{ TEXT("depth_size"), (double)DepthCompressed.Num() },
+					{ TEXT("rgb_raw_size"), (double)PixelData.Num() },
+					{ TEXT("depth_raw_size"), (double)DepthBytes } },
+				{ { TEXT("rgb_comp"), TEXT("jpeg") }, { TEXT("depth_comp"), TEXT("lz4") } });
 
 			Msg->Payload.SetNumUninitialized(RgbCompressed.Num() + DepthCompressed.Num());
 			FMemory::Memcpy(Msg->Payload.GetData(), RgbCompressed.GetData(),
