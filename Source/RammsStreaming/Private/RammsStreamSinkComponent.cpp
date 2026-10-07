@@ -350,8 +350,18 @@ void URammsStreamSinkComponent::ProcessDepthMessage(
 		return;
 	}
 
-	const int32 Width = static_cast<int32>(Meta->GetNumberField(TEXT("w")));
-	const int32 Height = static_cast<int32>(Meta->GetNumberField(TEXT("h")));
+	// Depth has its own grid when the camera has separate depth intrinsics, so
+	// prefer the dimensions that describe this payload. Falling back to "w"/"h"
+	// keeps older senders working, which is all there used to be -- and reshaping
+	// a depth buffer by the colour size is what made a mismatch look like a
+	// truncated frame (or, for a client without the length check below, a read
+	// off the end of the payload).
+	double	   DepthWVal = 0.0;
+	double	   DepthHVal = 0.0;
+	const bool bHasDepthDims = Meta->TryGetNumberField(TEXT("depth_w"), DepthWVal)
+		&& Meta->TryGetNumberField(TEXT("depth_h"), DepthHVal);
+	const int32 Width = bHasDepthDims ? static_cast<int32>(DepthWVal) : static_cast<int32>(Meta->GetNumberField(TEXT("w")));
+	const int32 Height = bHasDepthDims ? static_cast<int32>(DepthHVal) : static_cast<int32>(Meta->GetNumberField(TEXT("h")));
 
 	if (Width <= 0 || Height <= 0)
 	{

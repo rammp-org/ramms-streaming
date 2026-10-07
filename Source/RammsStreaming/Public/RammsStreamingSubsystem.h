@@ -94,6 +94,10 @@ public:
 	 * Broadcast raw depth frame data to all subscribed clients.
 	 * @param ChannelID  Identifies this camera/stream.
 	 * @param DepthData  float32 depth values (cm).
+	 * @param DepthWidth/DepthHeight  the grid DepthData is actually in. A camera
+	 *        with separate depth intrinsics captures depth at its own resolution,
+	 *        so this is NOT Width/Height in general. Zero means "same as
+	 *        Width/Height", which is the common case and the old behaviour.
 	 * @param Width      Image width.
 	 * @param Height     Image height.
 	 * @param MetadataJson  Optional JSON metadata.
@@ -101,7 +105,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "RAMMS|Streaming")
 	void BroadcastDepthFrame(int32 ChannelID, const TArray<float>& DepthData,
 		int32 Width, int32 Height,
-		const FString& MetadataJson = TEXT(""));
+		const FString& MetadataJson = TEXT(""),
+		int32 DepthWidth = 0, int32 DepthHeight = 0);
 
 	/**
 	 * Broadcast combined RGBD frame (RGB followed by depth) to all subscribed
@@ -110,7 +115,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "RAMMS|Streaming")
 	void BroadcastRGBDFrame(int32 ChannelID, const TArray<uint8>& PixelData,
 		const TArray<float>& DepthData, int32 Width,
-		int32 Height, const FString& MetadataJson = TEXT(""));
+		int32 Height, const FString& MetadataJson = TEXT(""),
+		int32 DepthWidth = 0, int32 DepthHeight = 0);
 
 	// ── Events ───────────────────────────────────────────────────────
 
