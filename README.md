@@ -325,14 +325,21 @@ Which message carries what:
 **Reshape depth by `depth_w`/`depth_h` when they are present**, falling back to
 `w`/`h` when they are not — that fallback is what every sender produced before
 these keys existed, and it remains correct for the common case where the two
-grids match. The addition is backwards compatible: the binary header is
-unchanged, so `VERSION` stays at 1, and a client that ignores the new keys
-behaves exactly as it did.
+grids match.
 
-Before these keys existed the source component labelled the depth payload with
-the colour dimensions, so a client that trusted `w`/`h` reshaped depth by the
-wrong size — a truncated or skewed image at best, and a read past the end of
-the payload for a client that did not check the length.
+The **wire format** is compatible: the binary header is unchanged, so `VERSION`
+stays at 1, and the two new keys are additions a client that does not read them
+can ignore.
+
+The **behaviour** is not identical, and a client cannot opt out of the change by
+ignoring the new keys. On a `FrameDepth` message whose grids differ, `w`/`h` now
+report the depth dimensions where they previously reported the colour ones.
+That is a fix — the old values described a buffer the payload was not in, so a
+client that trusted them reshaped depth by the wrong size, giving a truncated or
+skewed image at best and a read past the end of the payload for a client that
+did not check the length — but a client that compensated for the old behaviour
+by deriving depth dimensions some other way will now be compensating twice.
+Where the grids match, nothing changes.
 
 ---
 
