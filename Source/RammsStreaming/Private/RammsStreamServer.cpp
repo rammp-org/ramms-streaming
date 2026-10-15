@@ -158,16 +158,25 @@ uint32 FRammsStreamServer::Run()
 			}
 		}
 
-		// Flush outbound queues for all connections
+		// Flush outbound queues for all connections. The sends happen outside ConnectionsLock:
+		// a slow client blocks its socket, and holding the lock across that stalled every
+		// BroadcastToSubscribers call on the game thread (the whole sim) behind it. Unsent frames
+		// are dropped by the per-connection queue instead.
 		{
-			FScopeLock Lock(&ConnectionsLock);
-			for (auto& Pair : Connections)
+			TArray<TSharedPtr<FRammsStreamConnection>> ToFlush;
 			{
-				if (Pair.Value.IsValid() && Pair.Value->IsConnected())
+				FScopeLock Lock(&ConnectionsLock);
+				for (auto& Pair : Connections)
 				{
-					int32 Flushed = Pair.Value->FlushOutbound();
-					Stats.FramesSent += Flushed;
+					if (Pair.Value.IsValid() && Pair.Value->IsConnected())
+					{
+						ToFlush.Add(Pair.Value);
+					}
 				}
+			}
+			for (const TSharedPtr<FRammsStreamConnection>& Conn : ToFlush)
+			{
+				Stats.FramesSent += Conn->FlushOutbound();
 			}
 		}
 
@@ -269,7 +278,7 @@ void FRammsStreamServer::Tick()
 
 	// Collect inbound messages from all connections
 	TArray<TPair<uint32, FRammsStreamMessage>> InboundMessages;
-	TArray<FRammsStreamMessage> ConnMessages;
+	TArray<FRammsStreamMessage>				   ConnMessages;
 	{
 		FScopeLock Lock(&ConnectionsLock);
 		for (auto& Pair : Connections)

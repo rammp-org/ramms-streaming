@@ -56,15 +56,39 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming")
 	FString CameraFilter;
 
+	/** Start the RMSS server on BeginPlay if nothing else has (e.g. for the ROS 2 bridge). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming|Auto Start")
+	bool bAutoStartServer = false;
+
+	/** Port used when bAutoStartServer starts the server. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming|Auto Start", meta = (EditCondition = "bAutoStartServer"))
+	int32 ServerPort = 30030;
+
+	/**
+	 * Start the camera capture subsystem once cameras are registered, so frames flow without a
+	 * recording running. Disk serialization is switched off and only the streamed planes are
+	 * captured. Skipped if a capture is already running.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming|Auto Start")
+	bool bAutoStartCapture = false;
+
+	/** Capture every N game frames when bAutoStartCapture starts the capture. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming|Auto Start", meta = (EditCondition = "bAutoStartCapture", ClampMin = "1"))
+	int32 CaptureEveryNFrames = 3;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
 	/** Called when a frame is harvested by CameraCaptureSubsystem. */
 	void OnFrameCaptured(TSharedRef<const FCaptureData> Data);
 
 	FDelegateHandle CaptureHandle;
+
+	/** True when this component started the capture, so EndPlay stops it again. */
+	bool bStartedCapture = false;
 
 	/** Build metadata JSON for a frame. */
 	FString BuildMetadataJson(const FCaptureData& Data) const;
