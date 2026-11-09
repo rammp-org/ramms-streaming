@@ -76,6 +76,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming|Auto Start", meta = (EditCondition = "bAutoStartCapture", ClampMin = "1"))
 	int32 CaptureEveryNFrames = 3;
 
+	/**
+	 * Stagger the auto-started capture: cameras (sorted by name) are split into this many groups and one
+	 * group is captured per capture frame (UCameraCaptureSubsystem::SetCaptureGroups). 1 = all together.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming|Auto Start", meta = (EditCondition = "bAutoStartCapture", ClampMin = "1"))
+	int32 CaptureGroups = 1;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;

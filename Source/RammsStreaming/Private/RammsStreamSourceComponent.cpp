@@ -79,10 +79,11 @@ void URammsStreamSourceComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		CaptureSub->SetCaptureMode(ERammsCaptureMode::TonemappedColorPlusDepth);
 	}
 	CaptureSub->SetCaptureRate(CaptureEveryNFrames);
+	CaptureSub->SetCaptureGroups(CaptureGroups);
 	CaptureSub->StartCapture();
 	bStartedCapture = CaptureSub->IsCapturing();
-	UE_LOG(LogRammsStreamSource, Log, TEXT("StreamSource[Ch%d] started capture of %d camera(s), every %d frame(s), depth %s"),
-		ChannelID, CaptureSub->GetRegisteredCameras().Num(), CaptureEveryNFrames, bDepth ? TEXT("on") : TEXT("off"));
+	UE_LOG(LogRammsStreamSource, Log, TEXT("StreamSource[Ch%d] started capture of %d camera(s), every %d frame(s) in %d group(s), depth %s"),
+		ChannelID, CaptureSub->GetRegisteredCameras().Num(), CaptureEveryNFrames, CaptureGroups, bDepth ? TEXT("on") : TEXT("off"));
 	SetComponentTickEnabled(false);
 }
 
