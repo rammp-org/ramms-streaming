@@ -387,6 +387,76 @@ void URammsStreamingSubsystem::BroadcastRGBDFrame(
 	BroadcastMessage(Msg);
 }
 
+void URammsStreamingSubsystem::BroadcastMotionFrame(int32 ChannelID,
+	const TArray<float>& MotionData, int32 Width, int32 Height,
+	const FString& MetadataJson)
+{
+	const int64 Expected = static_cast<int64>(Width) * static_cast<int64>(Height) * 2;
+	if (Width <= 0 || Height <= 0 || MotionData.Num() != Expected)
+	{
+		UE_LOG(LogRammsStreamSub, Warning,
+			TEXT("Motion frame on channel %d dropped: %d values for a %dx%d grid (need %lld)"),
+			ChannelID, MotionData.Num(), Width, Height, Expected);
+		return;
+	}
+
+	auto Msg = MakeShared<FRammsStreamMessage>();
+	Msg->Header.MessageType = ERammsStreamMessageType::FrameMotion;
+	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
+	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
+	Msg->Header.Timestamp = FDateTime::UtcNow().ToUnixTimestamp() * 1000000LL + FDateTime::UtcNow().GetMillisecond() * 1000LL;
+
+	// The payload is the motion grid, so "w"/"h" describe it, as they describe
+	// the depth grid on a depth frame.
+	const FString Meta = MergeStreamMetadata(MetadataJson,
+		{ { TEXT("w"), (double)Width },
+			{ TEXT("h"), (double)Height },
+			{ TEXT("motion_w"), (double)Width },
+			{ TEXT("motion_h"), (double)Height } },
+		{ { TEXT("fmt"), TEXT("rg32f") } });
+
+	const int32 ByteCount = MotionData.Num() * sizeof(float);
+	Msg->Payload.SetNumUninitialized(ByteCount);
+	FMemory::Memcpy(Msg->Payload.GetData(), MotionData.GetData(), ByteCount);
+
+	Msg->SetMetadataString(Meta);
+	Msg->Header.PayloadLen = Msg->Payload.Num();
+	Msg->Header.MetadataLen = Msg->Metadata.Num();
+
+	BroadcastMessage(Msg);
+}
+
+void URammsStreamingSubsystem::BroadcastFrameData(int32 ChannelID,
+	const TArray<uint8>& Data, int32 Width, int32 Height,
+	const FString& Format, const FString& MetadataJson)
+{
+	if (Width <= 0 || Height <= 0 || Data.Num() == 0)
+	{
+		UE_LOG(LogRammsStreamSub, Warning,
+			TEXT("FrameData on channel %d dropped: %d bytes for a %dx%d grid"),
+			ChannelID, Data.Num(), Width, Height);
+		return;
+	}
+
+	auto Msg = MakeShared<FRammsStreamMessage>();
+	Msg->Header.MessageType = ERammsStreamMessageType::FrameData;
+	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
+	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
+	Msg->Header.Timestamp = FDateTime::UtcNow().ToUnixTimestamp() * 1000000LL + FDateTime::UtcNow().GetMillisecond() * 1000LL;
+
+	const FString Meta = MergeStreamMetadata(MetadataJson,
+		{ { TEXT("w"), (double)Width }, { TEXT("h"), (double)Height } },
+		{ { TEXT("fmt"), Format.IsEmpty() ? FString(TEXT("mono8")) : Format } });
+
+	Msg->Payload = Data;
+
+	Msg->SetMetadataString(Meta);
+	Msg->Header.PayloadLen = Msg->Payload.Num();
+	Msg->Header.MetadataLen = Msg->Metadata.Num();
+
+	BroadcastMessage(Msg);
+}
+
 // ---------------------------------------------------------------------------
 // Compression helpers
 // ---------------------------------------------------------------------------

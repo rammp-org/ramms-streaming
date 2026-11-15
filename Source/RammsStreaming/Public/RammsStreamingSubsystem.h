@@ -118,6 +118,29 @@ public:
 		int32 Height, const FString& MetadataJson = TEXT(""),
 		int32 DepthWidth = 0, int32 DepthHeight = 0);
 
+	/**
+	 * Broadcast a motion-vector frame (FrameMotion) to all subscribed clients.
+	 * @param ChannelID   Identifies this stream (a camera source sends motion on
+	 *                    its ChannelID + 200).
+	 * @param MotionData  Interleaved float32 x,y per pixel (pixels per frame),
+	 *                    row-major: Width * Height * 2 values.
+	 * @param Width/Height  The motion grid. "w"/"h", "motion_w"/"motion_h" and
+	 *                    fmt "rg32f" are added to MetadataJson. Never compressed.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "RAMMS|Streaming")
+	void BroadcastMotionFrame(int32 ChannelID, const TArray<float>& MotionData,
+		int32 Width, int32 Height, const FString& MetadataJson = TEXT(""));
+
+	/**
+	 * Broadcast a generic frame (FrameData) whose pixel format is named by
+	 * Format ("mono8", "float32", "rg32f", "bgra8" ...) to all subscribed
+	 * clients. "w"/"h" and "fmt" are added to MetadataJson. Never compressed.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "RAMMS|Streaming")
+	void BroadcastFrameData(int32 ChannelID, const TArray<uint8>& Data,
+		int32 Width, int32 Height, const FString& Format,
+		const FString& MetadataJson = TEXT(""));
+
 	// ── Events ───────────────────────────────────────────────────────
 
 	/** Fired on the game thread when an inbound message arrives from a client. */
