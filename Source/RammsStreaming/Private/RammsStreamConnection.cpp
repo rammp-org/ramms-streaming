@@ -315,7 +315,10 @@ void FRammsStreamConnection::ApplySubscription(bool bSubscribe, bool bListed, co
 		}
 		else
 		{
-			SubscribedChannels.Append(Channels);
+			for (const uint16 Channel : Channels)
+			{
+				SubscribedChannels.Add(Channel);
+			}
 		}
 		return;
 	}
@@ -329,7 +332,10 @@ void FRammsStreamConnection::ApplySubscription(bool bSubscribe, bool bListed, co
 	}
 	else if (bSubscribedToAll)
 	{
-		UnsubscribedChannels.Append(Channels);
+		for (const uint16 Channel : Channels)
+		{
+			UnsubscribedChannels.Add(Channel);
+		}
 	}
 	else
 	{
