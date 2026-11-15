@@ -27,7 +27,8 @@ DECLARE_DELEGATE_TwoParams(FOnStreamMessageReceived, uint32 /*ConnectionId*/,
  *   3. Call Tick() every frame (or timer) to process inbound messages and drop
  * dead connections.
  *   4. Call BroadcastToSubscribers() to push camera frames to interested
- * clients.
+ * clients (those that subscribed: a client is sent frames only after it has
+ * sent Subscribe).
  *   5. Call StopListening() on shutdown.
  *
  * Sending never blocks the caller or holds the connection lock: broadcasting
@@ -58,8 +59,9 @@ public:
 	int32  GetMaxClients() const { return MaxClients; }
 	int32  GetConnectionCount() const;
 
-	/** True when a connected client would be sent a message on Channel: it subscribed to it, or to nothing (which
-	 *  means everything). Thread-safe. */
+	/** True when a connected client would be sent a message on Channel: it subscribed to that channel, or to every
+	 *  channel (a Subscribe without channels). A client that never subscribed is sent no broadcasts and does not
+	 *  count. Thread-safe. */
 	bool HasSubscriber(uint16 Channel) const;
 
 	/** Queue size limits applied to new connections. Outbound: a client is sent the latest frame of each stream
@@ -69,12 +71,14 @@ public:
 
 	// ── Frame / message distribution ─────────────────────────────────
 	/**
-	 * Broadcast a message to all clients subscribed to its channel.
-	 * Thread-safe — can be called from any thread.
+	 * Broadcast a message to all clients subscribed to its channel (see HasSubscriber; a client that never
+	 * subscribed gets nothing). Thread-safe — can be called from any thread.
+	 * @param StreamKey  Which stream of the channel and message type Message belongs to (0: the only one); a
+	 *        newer frame of a stream takes the place of its queued older one (FRammsStreamConnection::EnqueueOutbound).
 	 */
-	void BroadcastToSubscribers(const TSharedRef<FRammsStreamMessage>& Message);
+	void BroadcastToSubscribers(const TSharedRef<FRammsStreamMessage>& Message, uint64 StreamKey = 0);
 
-	/** Send a message to a specific connection. */
+	/** Send a message to a specific connection, subscribed or not. */
 	bool SendTo(uint32						   ConnectionId,
 		const TSharedRef<FRammsStreamMessage>& Message);
 

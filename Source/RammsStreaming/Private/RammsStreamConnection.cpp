@@ -2,6 +2,7 @@
 
 #include "RammsStreamConnection.h"
 #include "HAL/RunnableThread.h"
+#include "Misc/ScopeExit.h"
 #include "SocketSubsystem.h"
 #include "Sockets.h"
 
@@ -106,6 +107,7 @@ uint32 FRammsStreamConnection::Run()
 		{
 			continue;
 		}
+		ReceivedBytes += static_cast<uint64>(BytesRead);
 
 		// Append to receive buffer
 		const int32 OldSize = RecvBuffer.Num();
@@ -206,7 +208,7 @@ namespace RammsStreamConnectionImpl
 } // namespace RammsStreamConnectionImpl
 
 bool FRammsStreamConnection::EnqueueOutbound(
-	const TSharedRef<FRammsStreamMessage>& Message, bool bDropOldest, int32* OutDropped)
+	const TSharedRef<FRammsStreamMessage>& Message, bool bDropOldest, int32* OutDropped, uint64 StreamKey)
 {
 	using RammsStreamConnectionImpl::IsDroppableFrame;
 
@@ -214,44 +216,56 @@ bool FRammsStreamConnection::EnqueueOutbound(
 	bool  bQueued = true;
 	{
 		FScopeLock Lock(&OutboundLock);
+		int32	   SameStream = INDEX_NONE;
 		if (bDropOldest && IsDroppableFrame(*Message))
 		{
-			// A newer frame of the same stream replaces one still waiting, so a slow client is sent the latest
-			// of each stream instead of working through a backlog. The four streams of a camera (and several
-			// cameras) are different channels, so they no longer push each other out.
+			// A newer frame of the same stream takes the place of one still waiting, so a slow client is sent the
+			// latest of every stream instead of working through a backlog. In place, not moved to the back: each
+			// stream keeps its turn, so the streams queued last in a tick (a camera's mask after its colour, depth
+			// and motion; an IMU feed) are not starved by the ones queued before them. The stream key keeps the
+			// cameras a source sends on one channel apart.
 			const uint16				  Channel = Message->Header.ChannelID;
 			const ERammsStreamMessageType Type = Message->Header.MessageType;
-			Dropped += OutboundQueue.RemoveAll([Channel, Type](const TSharedRef<FRammsStreamMessage>& Queued) {
-				return Queued->Header.ChannelID == Channel && Queued->Header.MessageType == Type;
+			SameStream = OutboundQueue.IndexOfByPredicate([Channel, Type, StreamKey](const FQueuedOutbound& Queued) {
+				return Queued.StreamKey == StreamKey && Queued.Message->Header.ChannelID == Channel
+					&& Queued.Message->Header.MessageType == Type;
 			});
 		}
-		if (OutboundQueue.Num() >= FMath::Max(1, MaxOutboundQueueSize))
+		if (SameStream != INDEX_NONE)
 		{
-			// Make room with the oldest frame; acks and pongs stay. With only control messages queued, a frame is
-			// refused rather than one of them dropped (and a control message replaces the oldest one, so a client
-			// that only pings cannot grow the queue).
-			const int32 OldestFrame = bDropOldest
-				? OutboundQueue.IndexOfByPredicate([](const TSharedRef<FRammsStreamMessage>& Queued) {
-					  return IsDroppableFrame(*Queued);
-				  })
-				: INDEX_NONE;
-			if (OldestFrame != INDEX_NONE)
-			{
-				OutboundQueue.RemoveAt(OldestFrame);
-			}
-			else if (bDropOldest && !IsDroppableFrame(*Message))
-			{
-				OutboundQueue.RemoveAt(0);
-			}
-			else
-			{
-				bQueued = false;
-			}
+			OutboundQueue[SameStream].Message = Message;
 			++Dropped;
 		}
-		if (bQueued)
+		else
 		{
-			OutboundQueue.Add(Message);
+			if (OutboundQueue.Num() >= FMath::Max(1, MaxOutboundQueueSize))
+			{
+				// Make room with the oldest frame; acks and pongs stay. With only control messages queued, a frame
+				// is refused rather than one of them dropped (and a control message replaces the oldest one, so a
+				// client that only pings cannot grow the queue).
+				const int32 OldestFrame = bDropOldest
+					? OutboundQueue.IndexOfByPredicate([](const FQueuedOutbound& Queued) {
+						  return IsDroppableFrame(*Queued.Message);
+					  })
+					: INDEX_NONE;
+				if (OldestFrame != INDEX_NONE)
+				{
+					OutboundQueue.RemoveAt(OldestFrame);
+				}
+				else if (bDropOldest && !IsDroppableFrame(*Message))
+				{
+					OutboundQueue.RemoveAt(0);
+				}
+				else
+				{
+					bQueued = false;
+				}
+				++Dropped;
+			}
+			if (bQueued)
+			{
+				OutboundQueue.Add(FQueuedOutbound{ Message, StreamKey });
+			}
 		}
 	}
 	if (OutDropped)
@@ -274,7 +288,56 @@ bool FRammsStreamConnection::HasPendingOutbound() const
 void FRammsStreamConnection::GetQueuedOutbound(TArray<TSharedRef<FRammsStreamMessage>>& OutMessages) const
 {
 	FScopeLock Lock(&OutboundLock);
-	OutMessages = OutboundQueue;
+	OutMessages.Reset(OutboundQueue.Num());
+	for (const FQueuedOutbound& Queued : OutboundQueue)
+	{
+		OutMessages.Add(Queued.Message);
+	}
+}
+
+void FRammsStreamConnection::ApplySubscription(bool bSubscribe, bool bListed, const TArray<uint16>& Channels)
+{
+	if (bSubscribe)
+	{
+		if (!bListed)
+		{
+			// Every channel.
+			bSubscribedToAll = true;
+			UnsubscribedChannels.Reset();
+			SubscribedChannels.Reset();
+		}
+		else if (bSubscribedToAll)
+		{
+			for (const uint16 Channel : Channels)
+			{
+				UnsubscribedChannels.Remove(Channel);
+			}
+		}
+		else
+		{
+			SubscribedChannels.Append(Channels);
+		}
+		return;
+	}
+
+	if (!bListed)
+	{
+		// Nothing any more.
+		bSubscribedToAll = false;
+		UnsubscribedChannels.Reset();
+		SubscribedChannels.Reset();
+	}
+	else if (bSubscribedToAll)
+	{
+		UnsubscribedChannels.Append(Channels);
+	}
+	else
+	{
+		for (const uint16 Channel : Channels)
+		{
+			SubscribedChannels.Remove(Channel);
+		}
+	}
 }
 
 void FRammsStreamConnection::FailSend(const TCHAR* Why)
@@ -284,13 +347,21 @@ void FRammsStreamConnection::FailSend(const TCHAR* Why)
 	bConnected = false;
 }
 
-int32 FRammsStreamConnection::FlushOutbound()
+int32 FRammsStreamConnection::FlushOutbound(int64* OutBytesSent)
 {
 	// Never waits. The listen socket is non-blocking, an accepted socket is made non-blocking too, and a frame
 	// larger than the socket's send buffer (a 640x480 colour frame is 1.2 MB) fills it: that is back-pressure, not
 	// a dead client. What the socket does not take now is sent on a later call, from where it stopped, while the
 	// send thread serves the other clients in between.
 	int32 Completed = 0;
+	int64 Sent = 0;
+	ON_SCOPE_EXIT
+	{
+		if (OutBytesSent)
+		{
+			*OutBytesSent = Sent;
+		}
+	};
 	while (!bStopping && bConnected)
 	{
 		if (!InFlight.IsValid())
@@ -301,7 +372,7 @@ int32 FRammsStreamConnection::FlushOutbound()
 				{
 					return Completed;
 				}
-				InFlight = OutboundQueue[0];
+				InFlight = OutboundQueue[0].Message;
 				OutboundQueue.RemoveAt(0, EAllowShrinking::No);
 			}
 			FRammsStreamHeader Header = InFlight->Header;
@@ -339,6 +410,7 @@ int32 FRammsStreamConnection::FlushOutbound()
 			if (Socket->Send(Data, static_cast<int32>(Remaining), BytesSent) && BytesSent > 0)
 			{
 				InFlightOffset += BytesSent;
+				Sent += BytesSent;
 				LastSendProgressSeconds = FPlatformTime::Seconds();
 				continue;
 			}

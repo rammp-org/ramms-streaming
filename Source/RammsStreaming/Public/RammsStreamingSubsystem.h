@@ -53,10 +53,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	FString GetLastServerError() const { return LastServerError; }
 
-	/** True when the server is running and a connected client would be sent a frame on ChannelID (it subscribed
-	 *  to that channel, or to none, which means all). Frame broadcasts to a channel nobody wants are skipped. */
+	/** True when the server is running and a connected client would be sent a frame on ChannelID: it subscribed to
+	 *  that channel, or to every channel (a Subscribe without channels). A client that never subscribed is sent no
+	 *  frames and does not count. Frame broadcasts to a channel nobody wants are skipped. */
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	bool IsChannelWanted(int32 ChannelID) const;
+
+	/**
+	 * C++: the key that tells one stream from another on the same channel and message type (FRammsStreamConnection::
+	 * EnqueueOutbound): a newer frame of a stream takes the place of its queued older one, and frames of different
+	 * streams -- several cameras a source sends on one channel -- never take each other's. Made from the stream id,
+	 * the actor and the camera; 0 when all three are empty (the channel and type's only stream).
+	 */
+	static uint64 MakeStreamKey(const FString& StreamId, const FString& Actor, const FString& Camera);
+
+	/** C++: MakeStreamKey from a frame's metadata JSON ("stream_id", "actor", "camera"); 0 without any of them. */
+	static uint64 StreamKeyFromMetadata(const FString& MetadataJson);
 
 	// ── Compression configuration ───────────────────────────────────
 
@@ -80,8 +92,8 @@ public:
 	int32 MaxInboundQueueSize = 0;
 
 	/** Maximum outbound messages queued per connection. A client is sent the latest frame of each stream (a newer
-	 *  frame replaces a queued older one of the same channel), so this bounds how many streams can wait at once;
-	 *  past it the oldest queued frame is dropped. */
+	 *  frame takes the place of a queued older one of the same stream), so this bounds how many streams can wait at
+	 *  once; past it the oldest queued frame is dropped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming",
 		meta = (ClampMin = "1"))
 	int32 MaxOutboundQueueSize = 32;
@@ -157,10 +169,10 @@ public:
 	 * MetadataJson is sent as given, so it must describe the payload ("w", "h", "fmt" ...). FrameRGB (BGRA8 of
 	 * Width x Height) and FrameDepth payloads are JPEG / LZ4 compressed like BroadcastRGBFrame and
 	 * BroadcastDepthFrame when bEnableCompression is on; any other type is sent as is. Skipped when nobody
-	 * subscribes to ChannelID.
+	 * subscribes to ChannelID. StreamKey: the frame's stream (MakeStreamKey); 0 takes it from MetadataJson.
 	 */
 	void BroadcastEncodedFrame(ERammsStreamMessageType Type, int32 ChannelID, TArray<uint8>&& Payload, int32 Width,
-		int32 Height, const FString& MetadataJson);
+		int32 Height, const FString& MetadataJson, uint64 StreamKey = 0);
 
 	// ── Events ───────────────────────────────────────────────────────
 
@@ -186,8 +198,8 @@ private:
 	FTSTicker::FDelegateHandle TickHandle;
 	void					   OnTick(float DeltaTime);
 
-	/** Internal: build and broadcast a message. */
-	void BroadcastMessage(TSharedRef<FRammsStreamMessage> Msg);
+	/** Internal: broadcast a built message as a frame of the stream StreamKey (see MakeStreamKey). */
+	void BroadcastMessage(TSharedRef<FRammsStreamMessage> Msg, uint64 StreamKey);
 
 	/** A frame message of Type on ChannelID with its sequence number and timestamp, or null when the channel is
 	 *  out of range or nobody would be sent it. */

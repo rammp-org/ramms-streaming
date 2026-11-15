@@ -4,6 +4,7 @@
 #include "CameraCaptureSegmentation.h"
 #include "CameraCaptureSubsystem.h"
 #include "Dom/JsonObject.h"
+#include "RammsStreamingSubsystem.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
@@ -193,7 +194,21 @@ int32 FRammsCameraStreams::NumSegmentIds(const FCameraCaptureSegTable& SegTable)
 			Highest = Value;
 		}
 	}
+	// A reserved value is something else's custom-depth stencil (RammsUI's projector surfaces, say), kept as it is:
+	// it shows up in the mask, so a client sizing a palette or normalising by NumSegmentIDs must cover it too.
+	for (const int32 Value : SegTable.Reserved)
+	{
+		if (Value >= 0 && Value <= MAX_uint8)
+		{
+			Highest = FMath::Max(Highest, Value);
+		}
+	}
 	return Highest + 1;
+}
+
+uint64 FRammsCameraStreams::StreamKey(const FCaptureData& Data, const FString& StreamName, ERammsCameraStreamRole Role)
+{
+	return URammsStreamingSubsystem::MakeStreamKey(StreamId(StreamName, Role), Data.ActorPath, Data.CameraID.ToString());
 }
 
 FString FRammsCameraStreams::BuildFrameMetadataJson(const FCaptureData& Data, const FString& StreamName, ERammsCameraStreamRole Role,
@@ -234,11 +249,19 @@ FString FRammsCameraStreams::BuildFrameMetadataJson(const FCaptureData& Data, co
 		Json->SetNumberField(TEXT("w"), Data.ClassWidth);
 		Json->SetNumberField(TEXT("h"), Data.ClassHeight);
 
-		int32					NumIds = 1;
-		TSharedRef<FJsonObject> Classes = MakeShared<FJsonObject>();
+		// Every value the mask holds is below NumSegmentIDs: the table's classes and reserved values, and (should a
+		// stencil the table does not know get through) the frame's own highest value.
+		uint8 HighestPixel = 0;
+		for (const uint8 Pixel : Data.ClassData)
+		{
+			HighestPixel = FMath::Max(HighestPixel, Pixel);
+		}
+		int32						   NumIds = static_cast<int32>(HighestPixel) + 1;
+		TSharedRef<FJsonObject>		   Classes = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> Reserved;
 		if (SegTable)
 		{
-			NumIds = NumSegmentIds(*SegTable);
+			NumIds = FMath::Max(NumIds, NumSegmentIds(*SegTable));
 			for (int32 Value = 0; Value < SegTable->FineNames.Num(); ++Value)
 			{
 				if (!SegTable->FineNames[Value].IsNone())
@@ -246,15 +269,12 @@ FString FRammsCameraStreams::BuildFrameMetadataJson(const FCaptureData& Data, co
 					Classes->SetStringField(FString::FromInt(Value), SegTable->FineNames[Value].ToString());
 				}
 			}
-		}
-		else
-		{
-			uint8 HighestPixel = 0;
-			for (const uint8 Pixel : Data.ClassData)
+			TArray<int32> ReservedValues = SegTable->Reserved.Array();
+			ReservedValues.Sort();
+			for (const int32 Value : ReservedValues)
 			{
-				HighestPixel = FMath::Max(HighestPixel, Pixel);
+				Reserved.Add(MakeShared<FJsonValueNumber>(Value));
 			}
-			NumIds = static_cast<int32>(HighestPixel) + 1;
 		}
 
 		TSharedRef<FJsonObject> MaterialParams = MakeShared<FJsonObject>();
@@ -262,6 +282,7 @@ FString FRammsCameraStreams::BuildFrameMetadataJson(const FCaptureData& Data, co
 		Json->SetObjectField(TEXT("material_params"), MaterialParams);
 		Json->SetObjectField(TEXT("MaterialScalarParameters"), MaterialParams);
 		Json->SetObjectField(TEXT("classes"), Classes);
+		Json->SetArrayField(TEXT("reserved"), Reserved);
 	}
 
 	FString															 OutputString;
@@ -346,5 +367,6 @@ bool FRammsCameraStreams::BuildFrame(const FCaptureData& Data, const FString& St
 		}
 	}
 	OutFrame.MetadataJson = BuildFrameMetadataJson(Data, StreamName, Role, Role == ERammsCameraStreamRole::Mask ? SegTable : nullptr);
+	OutFrame.StreamKey = StreamKey(Data, StreamName, Role);
 	return true;
 }

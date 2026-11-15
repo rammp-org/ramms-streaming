@@ -1,5 +1,5 @@
-// Tests for RMSS sending: the outbound queue policy, a server that never waits on a slow client, a port another
-// listener holds, and the camera frames a stream source builds.
+// Tests for RMSS sending: the outbound queue policy, subscriptions (no frames before Subscribe), a server that never
+// waits on a slow client, a port another listener holds, and the camera frames a stream source builds.
 //
 // The server tests run a real FRammsStreamServer on a free loopback port with real client sockets.
 
@@ -17,6 +17,7 @@
 #include "RammsStreamProtocol.h"
 #include "RammsStreamServer.h"
 #include "RammsStreamSourceComponent.h"
+#include "RammsStreamingSubsystem.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "SocketSubsystem.h"
@@ -120,6 +121,71 @@ namespace RammsStreamingTests
 		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
 		return FJsonSerializer::Deserialize(Reader, Obj) ? Obj : nullptr;
 	}
+
+	/** Send one control message (Subscribe, Unsubscribe, Ping) with this metadata JSON from a client. */
+	bool SendControl(FSocket& Socket, ERammsStreamMessageType Type, const FString& Json)
+	{
+		FRammsStreamMessage Msg;
+		Msg.Header.MessageType = Type;
+		if (!Json.IsEmpty())
+		{
+			Msg.SetMetadataString(Json);
+		}
+		const TArray<uint8> Bytes = Msg.Serialize();
+		int32				Total = 0;
+		while (Total < Bytes.Num())
+		{
+			int32 Sent = 0;
+			if (!Socket.Send(Bytes.GetData() + Total, Bytes.Num() - Total, Sent) || Sent <= 0)
+			{
+				return false;
+			}
+			Total += Sent;
+		}
+		return true;
+	}
+
+	int32 CountOf(const TArray<FRammsStreamHeader>& Headers, ERammsStreamMessageType Type)
+	{
+		int32 Count = 0;
+		for (const FRammsStreamHeader& Header : Headers)
+		{
+			Count += Header.MessageType == Type ? 1 : 0;
+		}
+		return Count;
+	}
+
+	/**
+	 * Send a control message, then a Ping, and tick the server until the client has the Ping back: the server
+	 * handles one client's messages in order, so the first one has been applied by then.
+	 */
+	bool Request(FRammsStreamServer& Server, FSocket& Client, ERammsStreamMessageType Type, const FString& Json,
+		TArray<uint8>& Buffer, TArray<FRammsStreamHeader>& Received)
+	{
+		const int32 PongsBefore = CountOf(Received, ERammsStreamMessageType::Ping);
+		if ((Type != ERammsStreamMessageType::Ping && !SendControl(Client, Type, Json))
+			|| !SendControl(Client, ERammsStreamMessageType::Ping, FString()))
+		{
+			return false;
+		}
+		return WaitFor([&]() {
+			Server.Tick();
+			DrainMessages(Client, Buffer, Received);
+			return CountOf(Received, ERammsStreamMessageType::Ping) > PongsBefore;
+		},
+			3.0);
+	}
+
+	/** The frames (not acks or pongs) among Headers on Channel. */
+	int32 FramesOn(const TArray<FRammsStreamHeader>& Headers, uint16 Channel)
+	{
+		int32 Count = 0;
+		for (const FRammsStreamHeader& Header : Headers)
+		{
+			Count += (Header.ChannelID == Channel && GetFrameCategory(Header.MessageType) != ERammsFrameCategory::Control) ? 1 : 0;
+		}
+		return Count;
+	}
 } // namespace RammsStreamingTests
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsStreamingQueueLatestPerStream, "Ramms.Streaming.Queue.LatestPerStream",
@@ -143,15 +209,36 @@ bool FRammsStreamingQueueLatestPerStream::RunTest(const FString& Parameters)
 	TestEqual(TEXT("nothing dropped"), Dropped, 0);
 	TestTrue(TEXT("colour kept"), Queued.Num() > 0 && Queued[0]->Header.ChannelID == 0);
 
-	// A newer frame of a stream replaces the waiting one.
-	const TSharedRef<FRammsStreamMessage> Newer = MakeFrame(ERammsStreamMessageType::FrameRGB, 0);
-	Conn.EnqueueOutbound(Newer, true, &Dropped);
+	// A newer frame of a stream takes the waiting one's place -- in place, so the stream keeps its turn. Moved to the
+	// back instead, the stream queued last in each tick (the mask) would never be reached by a client that can take
+	// only part of a tick's frames.
+	const TSharedRef<FRammsStreamMessage> NewerDepth = MakeFrame(ERammsStreamMessageType::FrameDepth, 100);
+	Conn.EnqueueOutbound(NewerDepth, true, &Dropped);
 	Conn.GetQueuedOutbound(Queued);
 	TestEqual(TEXT("replaced, not added"), Queued.Num(), 4);
-	TestEqual(TEXT("the older colour frame dropped"), Dropped, 1);
-	TestTrue(TEXT("the newest colour frame is queued"), Queued.ContainsByPredicate([&Newer](const TSharedRef<FRammsStreamMessage>& M) {
-		return &M.Get() == &Newer.Get();
-	}));
+	TestEqual(TEXT("the older depth frame dropped"), Dropped, 1);
+	TestTrue(TEXT("the newer depth frame in the older one's place"), Queued.Num() == 4 && &Queued[1].Get() == &NewerDepth.Get());
+	TestTrue(TEXT("the streams queued after it keep their turn"),
+		Queued.Num() == 4 && Queued[2]->Header.ChannelID == 200 && Queued[3]->Header.ChannelID == 300);
+
+	// Several cameras on one channel (a source with a substring filter) are different streams: their stream keys
+	// keep them apart, and each keeps its latest frame.
+	FRammsStreamConnection				  Shared(nullptr, 4);
+	const uint64						  FrontKey = URammsStreamingSubsystem::MakeStreamKey(TEXT("camera/front/color"), TEXT("/A"), TEXT("A::front"));
+	const uint64						  RearKey = URammsStreamingSubsystem::MakeStreamKey(TEXT("camera/rear/color"), TEXT("/A"), TEXT("A::rear"));
+	const TSharedRef<FRammsStreamMessage> Front = MakeFrame(ERammsStreamMessageType::FrameRGB, 5);
+	const TSharedRef<FRammsStreamMessage> Rear = MakeFrame(ERammsStreamMessageType::FrameRGB, 5);
+	TestTrue(TEXT("two cameras, two keys"), FrontKey != 0 && RearKey != 0 && FrontKey != RearKey);
+	Shared.EnqueueOutbound(Front, true, &Dropped, FrontKey);
+	Shared.EnqueueOutbound(Rear, true, &Dropped, RearKey);
+	Shared.GetQueuedOutbound(Queued);
+	TestEqual(TEXT("both cameras queued on the one channel"), Queued.Num(), 2);
+	TestEqual(TEXT("the second camera dropped nothing"), Dropped, 0);
+	const TSharedRef<FRammsStreamMessage> NewerFront = MakeFrame(ERammsStreamMessageType::FrameRGB, 5);
+	Shared.EnqueueOutbound(NewerFront, true, &Dropped, FrontKey);
+	Shared.GetQueuedOutbound(Queued);
+	TestTrue(TEXT("a camera's newer frame replaces only its own"),
+		Queued.Num() == 2 && &Queued[0].Get() == &NewerFront.Get() && &Queued[1].Get() == &Rear.Get());
 
 	// Control messages are never replaced or pushed out.
 	FRammsStreamConnection Small(nullptr, 2);
@@ -183,6 +270,107 @@ bool FRammsStreamingQueueLatestPerStream::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsStreamingSubscriptions, "Ramms.Streaming.Server.NoFramesBeforeSubscribe",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsStreamingSubscriptions::RunTest(const FString& Parameters)
+{
+	using namespace RammsStreamingTests;
+
+	FRammsStreamServer Server(0, 4);
+	if (!TestTrue(TEXT("server listens on a free port"), Server.StartListening()))
+	{
+		return false;
+	}
+	const uint16 Port = Server.GetPort();
+
+	// Sender only sends (an image feed into UE: it never subscribes and never reads frames); Viewer subscribes.
+	FSocket* Sender = ConnectClient(Port, 64 * 1024);
+	FSocket* Viewer = ConnectClient(Port, 4 * 1024 * 1024);
+	if (!TestNotNull(TEXT("sender connects"), Sender) || !TestNotNull(TEXT("viewer connects"), Viewer))
+	{
+		CloseClient(Sender);
+		CloseClient(Viewer);
+		Server.StopListening();
+		return false;
+	}
+	TestTrue(TEXT("both clients accepted"), WaitFor([&Server]() { return Server.GetConnectionCount() == 2; }, 3.0));
+
+	TArray<uint8>			   SenderBuffer, ViewerBuffer;
+	TArray<FRammsStreamHeader> SenderGot, ViewerGot;
+	const auto				   Broadcast = [&Server](uint16 Channel, int32 Bytes) {
+		Server.BroadcastToSubscribers(MakeFrame(ERammsStreamMessageType::FrameRGB, Channel, Bytes));
+	};
+
+	// Nobody has subscribed: no channel is wanted, and a frame goes to nobody.
+	TestFalse(TEXT("no subscriber before any Subscribe"), Server.HasSubscriber(1));
+	Broadcast(1, 1024);
+	FPlatformProcess::Sleep(0.2f);
+	uint32 Pending = 0;
+	TestTrue(TEXT("the viewer is sent nothing before it subscribes"), !Viewer->HasPendingData(Pending) || Pending == 0);
+
+	// A client that never subscribed still gets the replies to its own requests.
+	TestTrue(TEXT("a pong to a client that never subscribed"), Request(Server, *Sender, ERammsStreamMessageType::Ping, FString(), SenderBuffer, SenderGot));
+
+	// Subscribed to channel 1: that channel only.
+	TestTrue(TEXT("subscribe to channel 1"), Request(Server, *Viewer, ERammsStreamMessageType::Subscribe, TEXT("{\"channels\": [1]}"), ViewerBuffer, ViewerGot));
+	TestEqual(TEXT("the subscription is acknowledged"), CountOf(ViewerGot, ERammsStreamMessageType::Ack), 1);
+	TestTrue(TEXT("channel 1 wanted"), Server.HasSubscriber(1));
+	TestFalse(TEXT("channel 2 not"), Server.HasSubscriber(2));
+	Broadcast(2, 1024);
+	Broadcast(1, 1024);
+	TestTrue(TEXT("the viewer gets its channel"), WaitFor([&]() {
+		DrainMessages(*Viewer, ViewerBuffer, ViewerGot);
+		return FramesOn(ViewerGot, 1) > 0;
+	},
+													  3.0));
+	TestEqual(TEXT("and not another"), FramesOn(ViewerGot, 2), 0);
+
+	// Unsubscribing the last listed channel leaves nothing, never "every channel".
+	TestTrue(TEXT("unsubscribe channel 1"), Request(Server, *Viewer, ERammsStreamMessageType::Unsubscribe, TEXT("{\"channels\": [1]}"), ViewerBuffer, ViewerGot));
+	TestFalse(TEXT("channel 1 no longer wanted"), Server.HasSubscriber(1));
+	TestFalse(TEXT("nor any other"), Server.HasSubscriber(2));
+
+	// Subscribe without a list (an empty one alike): every channel; Unsubscribe with a list takes those out of it.
+	TestTrue(TEXT("subscribe to everything"), Request(Server, *Viewer, ERammsStreamMessageType::Subscribe, TEXT("{\"channels\": []}"), ViewerBuffer, ViewerGot));
+	TestTrue(TEXT("every channel wanted"), Server.HasSubscriber(2) && Server.HasSubscriber(7) && Server.HasSubscriber(65535));
+	TestTrue(TEXT("unsubscribe channel 7"), Request(Server, *Viewer, ERammsStreamMessageType::Unsubscribe, TEXT("{\"channels\": [7]}"), ViewerBuffer, ViewerGot));
+	TestFalse(TEXT("channel 7 taken out"), Server.HasSubscriber(7));
+	TestTrue(TEXT("the rest still wanted"), Server.HasSubscriber(2));
+	TestTrue(TEXT("subscribe channel 7 again"), Request(Server, *Viewer, ERammsStreamMessageType::Subscribe, TEXT("{\"channels\": [7]}"), ViewerBuffer, ViewerGot));
+	TestTrue(TEXT("channel 7 back"), Server.HasSubscriber(7));
+
+	// Unsubscribe without a list: nothing at all.
+	TestTrue(TEXT("unsubscribe everything"), Request(Server, *Viewer, ERammsStreamMessageType::Unsubscribe, TEXT("{}"), ViewerBuffer, ViewerGot));
+	TestFalse(TEXT("nothing wanted"), Server.HasSubscriber(2) || Server.HasSubscriber(7));
+
+	// A Subscribe with no metadata at all reads as {}: every channel.
+	TestTrue(TEXT("bare subscribe"), Request(Server, *Viewer, ERammsStreamMessageType::Subscribe, FString(), ViewerBuffer, ViewerGot));
+	TestTrue(TEXT("every channel wanted again"), Server.HasSubscriber(3));
+
+	// Megabytes of frames later the sender, which never subscribed and reads nothing, has been queued nothing: it is
+	// neither filled up nor dropped for not reading.
+	for (int32 i = 0; i < 20; ++i)
+	{
+		Broadcast(1, 2 * 1024 * 1024);
+		DrainMessages(*Viewer, ViewerBuffer, ViewerGot);
+		FPlatformProcess::Sleep(0.002f);
+	}
+	FPlatformProcess::Sleep(0.2f);
+	Server.Tick();
+	Pending = 0;
+	TestTrue(TEXT("the sender was sent no frame"), !Sender->HasPendingData(Pending) || Pending == 0);
+	TestEqual(TEXT("the sender is still connected"), Server.GetConnectionCount(), 2);
+
+	// The statistics count both ways.
+	TestTrue(TEXT("bytes sent are counted"), Server.GetStats().TotalBytesSent.Load() > 0);
+	TestTrue(TEXT("bytes received are counted"), Server.GetStats().TotalBytesReceived.Load() > 0);
+
+	Server.StopListening();
+	CloseClient(Sender);
+	CloseClient(Viewer);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsStreamingServerSlowClient, "Ramms.Streaming.Server.SlowClientDoesNotBlock",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FRammsStreamingServerSlowClient::RunTest(const FString& Parameters)
@@ -199,7 +387,7 @@ bool FRammsStreamingServerSlowClient::RunTest(const FString& Parameters)
 	const uint16 Port = Server.GetPort();
 	TestTrue(TEXT("the bound port is reported"), Port != 0);
 
-	// Stalled never reads; Reader does.
+	// Stalled subscribes but never reads a frame; Reader does.
 	FSocket* Stalled = ConnectClient(Port, 8 * 1024);
 	FSocket* Reader = ConnectClient(Port, 4 * 1024 * 1024);
 	if (!TestNotNull(TEXT("stalled client connects"), Stalled) || !TestNotNull(TEXT("reading client connects"), Reader))
@@ -211,12 +399,19 @@ bool FRammsStreamingServerSlowClient::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("both clients accepted"), WaitFor([&Server]() { return Server.GetConnectionCount() == 2; }, 3.0));
 
+	// Both subscribe to channel 1 (frames go only to clients that subscribed).
+	TArray<uint8>			   ReaderBuffer, StalledBuffer;
+	TArray<FRammsStreamHeader> Received, StalledReceived;
+	TestTrue(TEXT("the stalled client subscribes"),
+		Request(Server, *Stalled, ERammsStreamMessageType::Subscribe, TEXT("{\"channels\": [1]}"), StalledBuffer, StalledReceived));
+	TestTrue(TEXT("the reading client subscribes"),
+		Request(Server, *Reader, ERammsStreamMessageType::Subscribe, TEXT("{\"channels\": [1]}"), ReaderBuffer, Received));
+	Received.Reset();
+
 	// Far more than the stalled client's socket buffers hold. Nothing on the game thread may wait for it.
-	constexpr int32			   FrameBytes = 2 * 1024 * 1024;
-	constexpr int32			   Frames = 40;
-	double					   LongestCall = 0.0;
-	TArray<uint8>			   ReaderBuffer;
-	TArray<FRammsStreamHeader> Received;
+	constexpr int32 FrameBytes = 2 * 1024 * 1024;
+	constexpr int32 Frames = 40;
+	double			LongestCall = 0.0;
 	for (int32 i = 0; i < Frames; ++i)
 	{
 		const TSharedRef<FRammsStreamMessage> Frame = MakeFrame(ERammsStreamMessageType::FrameRGB, 1, FrameBytes);
@@ -257,6 +452,7 @@ bool FRammsStreamingServerSlowClient::RunTest(const FString& Parameters)
 	Server.StopListening();
 	const double StopSeconds = FPlatformTime::Seconds() - StopStart;
 	TestTrue(FString::Printf(TEXT("StopListening is quick with a stalled client (%.3f s)"), StopSeconds), StopSeconds < 2.0);
+	TestEqual(TEXT("no connection outlives StopListening"), Server.GetConnectionCount(), 0);
 
 	CloseClient(Stalled);
 	CloseClient(Reader);
@@ -326,6 +522,7 @@ bool FRammsStreamingCameraFrames::RunTest(const FString& Parameters)
 		{ ERammsCameraStreamRole::Motion, Base + 200, ERammsStreamMessageType::FrameMotion, 2, 1, 2 * 8, TEXT("rg32f") },
 		{ ERammsCameraStreamRole::Mask, Base + 300, ERammsStreamMessageType::FrameData, 4, 2, 4 * 2, TEXT("mono8") },
 	};
+	TSet<uint64> Keys;
 	for (const FExpect& E : Expected)
 	{
 		const FString		 Role = FRammsCameraStreams::RoleName(E.Role);
@@ -340,6 +537,11 @@ bool FRammsStreamingCameraFrames::RunTest(const FString& Parameters)
 		TestEqual(Role + TEXT(": height"), Frame.Height, E.H);
 		TestEqual(Role + TEXT(": payload bytes"), Frame.Payload.Num(), E.Bytes);
 
+		// The stream key: the same one the frame's own metadata gives, and one per role.
+		TestTrue(Role + TEXT(": has a stream key"), Frame.StreamKey != 0);
+		TestTrue(Role + TEXT(": the key its metadata gives"), URammsStreamingSubsystem::StreamKeyFromMetadata(Frame.MetadataJson) == Frame.StreamKey);
+		Keys.Add(Frame.StreamKey);
+
 		const TSharedPtr<FJsonObject> Meta = ParseJson(Frame.MetadataJson);
 		if (!TestTrue(Role + TEXT(": metadata is JSON"), Meta.IsValid()))
 		{
@@ -352,6 +554,20 @@ bool FRammsStreamingCameraFrames::RunTest(const FString& Parameters)
 		TestEqual(Role + TEXT(": stream_id"), Meta->GetStringField(TEXT("stream_id")), FRammsCameraStreams::StreamId(TEXT("front"), E.Role));
 		TestEqual(Role + TEXT(": group"), Meta->GetStringField(TEXT("group")), FString(TEXT("front")));
 	}
+	TestEqual(TEXT("four roles, four stream keys"), Keys.Num(), 4);
+
+	// Another camera's colour on the same channel is another stream.
+	FCaptureData Other = Data;
+	Other.CameraID.ComponentName = TEXT("rear");
+	Other.CameraID.UniqueID = TEXT("Robot_C_0::rear");
+	FRammsCameraFrameOut FrontColor, RearColor;
+	if (FRammsCameraStreams::BuildFrame(Data, TEXT("front"), ERammsCameraStreamRole::Color, Base, nullptr, FrontColor)
+		&& FRammsCameraStreams::BuildFrame(Other, TEXT("rear"), ERammsCameraStreamRole::Color, Base, nullptr, RearColor))
+	{
+		TestTrue(TEXT("two cameras on one channel: two stream keys"), FrontColor.Channel == RearColor.Channel && FrontColor.StreamKey != RearColor.StreamKey);
+	}
+	TestTrue(TEXT("no metadata, no stream key"), URammsStreamingSubsystem::StreamKeyFromMetadata(FString()) == 0);
+	TestTrue(TEXT("metadata without an identity, no stream key"), URammsStreamingSubsystem::StreamKeyFromMetadata(TEXT("{\"w\": 4}")) == 0);
 
 	// The payloads hold the planes, in the wire formats.
 	FRammsCameraFrameOut Motion;
@@ -380,6 +596,33 @@ bool FRammsStreamingCameraFrames::RunTest(const FString& Parameters)
 		const TSharedPtr<FJsonObject>  Meta = ParseJson(Mask.MetadataJson);
 		const TSharedPtr<FJsonObject>* Classes = nullptr;
 		TestTrue(TEXT("mask: the class table"), Meta.IsValid() && Meta->TryGetObjectField(TEXT("classes"), Classes) && Classes && (*Classes)->GetStringField(TEXT("3")) == TEXT("Car"));
+		TestTrue(TEXT("mask: NumSegmentIDs from the table"), Meta.IsValid() && static_cast<int32>(Meta->GetObjectField(TEXT("MaterialScalarParameters"))->GetNumberField(TEXT("NumSegmentIDs"))) == 8);
+	}
+
+	// A reserved stencil value (something else's custom depth, RammsUI's projector surfaces say) shows up in the mask:
+	// NumSegmentIDs covers it and the metadata lists it.
+	Table.Reserved.Add(200);
+	TestEqual(TEXT("NumSegmentIds covers a reserved value"), FRammsCameraStreams::NumSegmentIds(Table), 201);
+	FCaptureData WithReserved = Data;
+	WithReserved.ClassData[6] = 200;
+	FRammsCameraFrameOut ReservedMask;
+	if (TestTrue(TEXT("mask with a reserved value built"), FRammsCameraStreams::BuildFrame(WithReserved, TEXT("front"), ERammsCameraStreamRole::Mask, Base, &Table, ReservedMask)))
+	{
+		const TSharedPtr<FJsonObject> Meta = ParseJson(ReservedMask.MetadataJson);
+		TestTrue(TEXT("NumSegmentIDs above every mask value"),
+			Meta.IsValid() && static_cast<int32>(Meta->GetObjectField(TEXT("MaterialScalarParameters"))->GetNumberField(TEXT("NumSegmentIDs"))) == 201);
+		const TArray<TSharedPtr<FJsonValue>>* Reserved = nullptr;
+		TestTrue(TEXT("reserved values listed"), Meta.IsValid() && Meta->TryGetArrayField(TEXT("reserved"), Reserved) && Reserved && Reserved->Num() == 1 && static_cast<int32>((*Reserved)[0]->AsNumber()) == 200);
+	}
+	// A value neither the table nor its reserved values know is still below NumSegmentIDs.
+	FCaptureData Stray = Data;
+	Stray.ClassData[6] = 250;
+	FRammsCameraFrameOut StrayMask;
+	if (FRammsCameraStreams::BuildFrame(Stray, TEXT("front"), ERammsCameraStreamRole::Mask, Base, &Table, StrayMask))
+	{
+		const TSharedPtr<FJsonObject> Meta = ParseJson(StrayMask.MetadataJson);
+		TestTrue(TEXT("NumSegmentIDs covers a stray value"),
+			Meta.IsValid() && static_cast<int32>(Meta->GetObjectField(TEXT("MaterialScalarParameters"))->GetNumberField(TEXT("NumSegmentIDs"))) == 251);
 	}
 
 	// Planes the capture did not produce are not built; nor a role whose channel would not fit the header.

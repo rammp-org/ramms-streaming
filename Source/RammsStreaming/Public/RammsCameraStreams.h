@@ -60,6 +60,9 @@ struct RAMMSSTREAMING_API FRammsCameraFrameOut
 	int32		  Height = 0;
 	TArray<uint8> Payload;
 	FString		  MetadataJson;
+	/** Which stream of its channel this is (URammsStreamingSubsystem::MakeStreamKey of its stream id, actor and
+	 *  camera), so the frames of several cameras a source sends on one channel do not take each other's place. */
+	uint64 StreamKey = 0;
 };
 
 /**
@@ -117,10 +120,12 @@ struct RAMMSSTREAMING_API FRammsCameraStreams
 	 * the depth grid (with "unit": "cm"), the motion grid (with motion_w /
 	 * motion_h and "unit": "px/frame") or the class-mask grid. Mask frames add
 	 * material_params and MaterialScalarParameters ({"NumSegmentIDs": highest
-	 * class value + 1}; the second key is the one rammp-ui's camera bridge and
-	 * ramms-tools' StreamSender use) and classes ({"<value>": "<fine class>"})
-	 * from SegTable. Without a table the mask's NumSegmentIDs is its highest
-	 * pixel value + 1 and classes is empty.
+	 * value the mask can hold + 1, see NumSegmentIds; the second key is the one
+	 * rammp-ui's camera bridge and ramms-tools' StreamSender use), classes
+	 * ({"<value>": "<fine class>"}) and reserved (the reserved stencil values,
+	 * which can appear in the mask unnamed) from SegTable. Without a table the
+	 * mask's NumSegmentIDs is its highest pixel value + 1 and classes and
+	 * reserved are empty.
 	 */
 	static FString BuildFrameMetadataJson(const FCaptureData& Data, const FString& StreamName, ERammsCameraStreamRole Role,
 		const FCameraCaptureSegTable* SegTable = nullptr);
@@ -128,8 +133,14 @@ struct RAMMSSTREAMING_API FRammsCameraStreams
 	/** The keys the source sent before streams carried an association: the RGBD path still sends exactly these. */
 	static TSharedRef<FJsonObject> BuildBaseMetadata(const FCaptureData& Data);
 
-	/** Highest fine class value in the table + 1 (1 when only "unlabeled" is defined). */
+	/** The highest value a mask can hold + 1: the highest fine class value in the table or reserved stencil value
+	 *  (something else's custom-depth stencil, kept as it is and so present in the mask), whichever is higher; 1
+	 *  when only "unlabeled" is defined. */
 	static int32 NumSegmentIds(const FCameraCaptureSegTable& SegTable);
+
+	/** The stream key of one role of one camera's frames (URammsStreamingSubsystem::MakeStreamKey of its stream id,
+	 *  the camera's actor and its capture id). */
+	static uint64 StreamKey(const FCaptureData& Data, const FString& StreamName, ERammsCameraStreamRole Role);
 
 	/** Whether Data carries the plane Role sends: colour pixels, depth, a full motion grid, a full class mask. */
 	static bool HasRole(const FCaptureData& Data, ERammsCameraStreamRole Role);

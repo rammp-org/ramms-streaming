@@ -3,6 +3,7 @@
 #include "RammsStreamingSubsystem.h"
 #include "Containers/Ticker.h"
 #include "Engine/GameInstance.h"
+#include "Hash/CityHash.h"
 #include "ImageCore.h"
 #include "ImageUtils.h"
 #include "Misc/Compression.h"
@@ -158,15 +159,25 @@ uint32 URammsStreamingSubsystem::GetNextSequence(uint16 ChannelID)
 }
 
 void URammsStreamingSubsystem::BroadcastMessage(
-	TSharedRef<FRammsStreamMessage> Msg)
+	TSharedRef<FRammsStreamMessage> Msg, uint64 StreamKey)
 {
 	if (!Server.IsValid() || !Server->IsListening())
 		return;
-	Server->BroadcastToSubscribers(Msg);
+	Server->BroadcastToSubscribers(Msg, StreamKey);
 }
 
 namespace RammsStreamingSubsystemImpl
 {
+	/** MakeStreamKey of a parsed metadata object. */
+	uint64 StreamKeyOf(const FJsonObject& Metadata)
+	{
+		FString StreamId, Actor, Camera;
+		Metadata.TryGetStringField(TEXT("stream_id"), StreamId);
+		Metadata.TryGetStringField(TEXT("actor"), Actor);
+		Metadata.TryGetStringField(TEXT("camera"), Camera);
+		return URammsStreamingSubsystem::MakeStreamKey(StreamId, Actor, Camera);
+	}
+
 	/** Microseconds since the Unix epoch, from one clock reading (two readings could straddle a second). */
 	int64 NowMicroseconds()
 	{
@@ -222,8 +233,34 @@ TSharedPtr<FRammsStreamMessage> URammsStreamingSubsystem::NewFrameMessage(ERamms
 	return Msg;
 }
 
+uint64 URammsStreamingSubsystem::MakeStreamKey(const FString& StreamId, const FString& Actor, const FString& Camera)
+{
+	if (StreamId.IsEmpty() && Actor.IsEmpty() && Camera.IsEmpty())
+	{
+		return 0;
+	}
+	const FString Identity = StreamId + TEXT("\n") + Actor + TEXT("\n") + Camera;
+	const uint64  Key = CityHash64(reinterpret_cast<const char*>(*Identity), static_cast<uint32>(Identity.Len() * sizeof(TCHAR)));
+	return Key != 0 ? Key : 1; // 0 means "no identity"
+}
+
+uint64 URammsStreamingSubsystem::StreamKeyFromMetadata(const FString& MetadataJson)
+{
+	if (MetadataJson.IsEmpty())
+	{
+		return 0;
+	}
+	TSharedPtr<FJsonObject>			Obj;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(MetadataJson);
+	if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
+	{
+		return 0;
+	}
+	return RammsStreamingSubsystemImpl::StreamKeyOf(*Obj);
+}
+
 void URammsStreamingSubsystem::BroadcastEncodedFrame(ERammsStreamMessageType Type, int32 ChannelID,
-	TArray<uint8>&& Payload, int32 Width, int32 Height, const FString& MetadataJson)
+	TArray<uint8>&& Payload, int32 Width, int32 Height, const FString& MetadataJson, uint64 StreamKey)
 {
 	const TSharedPtr<FRammsStreamMessage> NewMsg = NewFrameMessage(Type, ChannelID);
 	if (!NewMsg.IsValid())
@@ -259,7 +296,7 @@ void URammsStreamingSubsystem::BroadcastEncodedFrame(ERammsStreamMessageType Typ
 	Msg->Header.PayloadLen = Msg->Payload.Num();
 	Msg->Header.MetadataLen = Msg->Metadata.Num();
 
-	BroadcastMessage(Msg);
+	BroadcastMessage(Msg, StreamKey != 0 ? StreamKey : StreamKeyFromMetadata(MetadataJson));
 }
 
 namespace
@@ -272,9 +309,11 @@ namespace
 	 * had put there -- intrinsics, extrinsics, camera id, timestamp -- so a
 	 * compressed stream carried strictly less than an uncompressed one. Parsing
 	 * and adding keeps the caller's fields and lets the transport describe the
-	 * payload it actually produced.
+	 * payload it actually produced. OutStreamKey, if given, receives the stream key of the caller's metadata
+	 * (URammsStreamingSubsystem::MakeStreamKey).
 	 */
-	FString MergeStreamMetadata(const FString& BaseJson, const TMap<FString, double>& Numbers, const TMap<FString, FString>& Strings)
+	FString MergeStreamMetadata(const FString& BaseJson, const TMap<FString, double>& Numbers, const TMap<FString, FString>& Strings,
+		uint64* OutStreamKey = nullptr)
 	{
 		TSharedPtr<FJsonObject> Obj;
 		if (!BaseJson.IsEmpty())
@@ -291,6 +330,10 @@ namespace
 		if (!Obj.IsValid())
 		{
 			Obj = MakeShared<FJsonObject>();
+		}
+		if (OutStreamKey)
+		{
+			*OutStreamKey = RammsStreamingSubsystemImpl::StreamKeyOf(*Obj);
 		}
 
 		for (const TPair<FString, double>& N : Numbers)
@@ -353,7 +396,7 @@ void URammsStreamingSubsystem::BroadcastRGBFrame(int32 ChannelID,
 	Msg->Header.PayloadLen = Msg->Payload.Num();
 	Msg->Header.MetadataLen = Msg->Metadata.Num();
 
-	BroadcastMessage(Msg);
+	BroadcastMessage(Msg, StreamKeyFromMetadata(MetadataJson));
 }
 
 void URammsStreamingSubsystem::BroadcastDepthFrame(
@@ -376,12 +419,13 @@ void URammsStreamingSubsystem::BroadcastDepthFrame(
 	// Reinterpret float array as bytes
 	const int32 ByteCount = DepthData.Num() * sizeof(float);
 
+	uint64	StreamKey = 0;
 	FString Meta = MergeStreamMetadata(MetadataJson,
 		{ { TEXT("w"), (double)PayloadW },
 			{ TEXT("h"), (double)PayloadH },
 			{ TEXT("depth_w"), (double)PayloadW },
 			{ TEXT("depth_h"), (double)PayloadH } },
-		{ { TEXT("fmt"), TEXT("float32") }, { TEXT("unit"), TEXT("cm") } });
+		{ { TEXT("fmt"), TEXT("float32") }, { TEXT("unit"), TEXT("cm") } }, &StreamKey);
 
 	// Optional LZ4 compression
 	if (bEnableCompression)
@@ -409,7 +453,7 @@ void URammsStreamingSubsystem::BroadcastDepthFrame(
 	Msg->Header.PayloadLen = Msg->Payload.Num();
 	Msg->Header.MetadataLen = Msg->Metadata.Num();
 
-	BroadcastMessage(Msg);
+	BroadcastMessage(Msg, StreamKey);
 }
 
 void URammsStreamingSubsystem::BroadcastRGBDFrame(
@@ -434,6 +478,7 @@ void URammsStreamingSubsystem::BroadcastRGBDFrame(
 
 	// Transport fields are ADDED to whatever the caller supplied, never swapped
 	// for it, so intrinsics and extrinsics survive regardless of compression.
+	uint64	StreamKey = 0;
 	FString Meta = MergeStreamMetadata(MetadataJson,
 		{ { TEXT("w"), (double)Width },
 			{ TEXT("h"), (double)Height },
@@ -443,7 +488,8 @@ void URammsStreamingSubsystem::BroadcastRGBDFrame(
 			{ TEXT("depth_size"), (double)DepthBytes } },
 		{ { TEXT("rgb_fmt"), TEXT("bgra8") },
 			{ TEXT("depth_fmt"), TEXT("float32") },
-			{ TEXT("depth_unit"), TEXT("cm") } });
+			{ TEXT("depth_unit"), TEXT("cm") } },
+		&StreamKey);
 
 	// For RGBD, compress RGB portion with JPEG and depth with LZ4
 	// Both halves are concatenated; metadata carries their sizes
@@ -499,7 +545,7 @@ void URammsStreamingSubsystem::BroadcastRGBDFrame(
 	Msg->Header.PayloadLen = Msg->Payload.Num();
 	Msg->Header.MetadataLen = Msg->Metadata.Num();
 
-	BroadcastMessage(Msg);
+	BroadcastMessage(Msg, StreamKey);
 }
 
 void URammsStreamingSubsystem::BroadcastMotionFrame(int32 ChannelID,
@@ -524,12 +570,13 @@ void URammsStreamingSubsystem::BroadcastMotionFrame(int32 ChannelID,
 
 	// The payload is the motion grid, so "w"/"h" describe it, as they describe
 	// the depth grid on a depth frame.
+	uint64		  StreamKey = 0;
 	const FString Meta = MergeStreamMetadata(MetadataJson,
 		{ { TEXT("w"), (double)Width },
 			{ TEXT("h"), (double)Height },
 			{ TEXT("motion_w"), (double)Width },
 			{ TEXT("motion_h"), (double)Height } },
-		{ { TEXT("fmt"), TEXT("rg32f") } });
+		{ { TEXT("fmt"), TEXT("rg32f") } }, &StreamKey);
 
 	const int32 ByteCount = MotionData.Num() * sizeof(float);
 	Msg->Payload.SetNumUninitialized(ByteCount);
@@ -539,7 +586,7 @@ void URammsStreamingSubsystem::BroadcastMotionFrame(int32 ChannelID,
 	Msg->Header.PayloadLen = Msg->Payload.Num();
 	Msg->Header.MetadataLen = Msg->Metadata.Num();
 
-	BroadcastMessage(Msg);
+	BroadcastMessage(Msg, StreamKey);
 }
 
 void URammsStreamingSubsystem::BroadcastFrameData(int32 ChannelID,
@@ -566,9 +613,10 @@ void URammsStreamingSubsystem::BroadcastFrameData(int32 ChannelID,
 	}
 	const TSharedRef<FRammsStreamMessage> Msg = NewMsg.ToSharedRef();
 
+	uint64		  StreamKey = 0;
 	const FString Meta = MergeStreamMetadata(MetadataJson,
 		{ { TEXT("w"), (double)Width }, { TEXT("h"), (double)Height } },
-		{ { TEXT("fmt"), Fmt } });
+		{ { TEXT("fmt"), Fmt } }, &StreamKey);
 
 	Msg->Payload = Data;
 
@@ -576,7 +624,7 @@ void URammsStreamingSubsystem::BroadcastFrameData(int32 ChannelID,
 	Msg->Header.PayloadLen = Msg->Payload.Num();
 	Msg->Header.MetadataLen = Msg->Metadata.Num();
 
-	BroadcastMessage(Msg);
+	BroadcastMessage(Msg, StreamKey);
 }
 
 // ---------------------------------------------------------------------------

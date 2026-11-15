@@ -232,8 +232,10 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 		FRammsCameraFrameOut Frame;
 		if (FRammsCameraStreams::BuildFrame(*Data, CameraStreamName, Role, ChannelID, SegTable.Get(), Frame))
 		{
+			// Keyed by camera as well as role: a substring (or empty) filter sends several cameras on one channel,
+			// and a slow client keeps the latest frame of each of them.
 			StreamSub->BroadcastEncodedFrame(Frame.Message, Frame.Channel, MoveTemp(Frame.Payload), Frame.Width,
-				Frame.Height, Frame.MetadataJson);
+				Frame.Height, Frame.MetadataJson, Frame.StreamKey);
 		}
 	}
 }
