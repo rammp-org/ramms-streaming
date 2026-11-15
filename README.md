@@ -359,7 +359,11 @@ Central manager for the streaming server and frame broadcasting.
 | `BroadcastDepthFrame(Channel, DepthData, W, H, Metadata, DepthW, DepthH)` | Push a float32 depth frame. `DepthW`/`DepthH` default to 0, meaning "same as W/H". |
 | `BroadcastRGBDFrame(Channel, PixelData, DepthData, W, H, Metadata, DepthW, DepthH)` | Push a fused RGBD frame. `W`/`H` describe the RGB half; `DepthW`/`DepthH` the depth half. |
 | `BroadcastMotionFrame(Channel, MotionData, W, H, Metadata)` | Push a `FrameMotion` frame: interleaved float32 x,y per pixel (`rg32f`), never compressed. |
-| `BroadcastFrameData(Channel, Data, W, H, Format, Metadata)` | Push a `FrameData` frame in the named pixel format (`mono8`, `float32` ...), never compressed. |
+| `BroadcastFrameData(Channel, Data, W, H, Format, Metadata)` | Push a `FrameData` frame in the named pixel format (`mono8`, `float32` ...), never compressed. A known format must fill `W`×`H` exactly. |
+| `BroadcastEncodedFrame(Type, Channel, Payload&&, W, H, Metadata)` | C++: push a frame already in its wire format, taking the payload over; the metadata is sent as given. |
+| `IsChannelWanted(Channel)` | Whether a connected client would be sent a frame on the channel. Every `Broadcast*` skips a channel nobody wants. |
+| `GetLastServerError()` | Why the last `StartServer` failed, e.g. the port is already in use by another program. |
+| `MaxOutboundQueueSize` | Messages queued per client (default 32); see `FRammsStreamConnection` below. |
 | `OnMessageReceived` | Blueprint delegate fired when an inbound message arrives. |
 | `OnNativeMessageReceived` | Native (C++) delegate with full `FRammsStreamMessage` payload. |
 | `bEnableCompression` | Global toggle — JPEG for RGB, LZ4 for depth. |
@@ -379,7 +383,7 @@ Bridges the **CameraCapture** plugin into the RMSS server for outbound streaming
 | `bExactCameraFilter` | `bool` | `CameraFilter` is the exact name of a camera component on this actor, not a substring of any camera's id. |
 | `bStreamMotion` | `bool` | Forward motion vectors as `FrameMotion` on `ChannelID + 200` (default off). |
 | `bStreamSegmentation` | `bool` | Forward the segmentation class mask as `FrameData` `mono8` on `ChannelID + 300` (default off). |
-| `StreamName` | `FString` | The camera's name in the stream ids and `group`; empty = the camera component's name. |
+| `StreamName` | `FString` | With `bExactCameraFilter`, the camera's name in the stream ids and `group`; otherwise (and when empty) the camera component's name is used. |
 
 Per camera with base channel `C`, the source sends (only the enabled ones):
 
@@ -392,12 +396,26 @@ Per camera with base channel `C`, the source sends (only the enabled ones):
 
 Each of these frames keeps the metadata keys the source has always sent (`w`, `h`, `depth_w`, `depth_h`,
 `frame`, `timestamp`, `camera`, `actor`, `transform`, `intrinsics`) and adds `stream_id`, `group` (the
-stream name), `role`, `name` (`"<name> Color"` ...) and `fmt`. `w`/`h` always describe the payload: the
+stream name), `role`, `name` (`"<name> Color"` ...) and `fmt`. `actor` is the object path of the actor that
+owns the camera. `w`/`h` always describe the payload: the depth grid on a depth frame (also `unit: "cm"`), the
 motion grid on a motion frame (also `motion_w`/`motion_h`), the class-mask grid on a mask frame. Mask frames
 add `material_params` and `MaterialScalarParameters` (both `{"NumSegmentIDs": highest class value + 1}`; the
 second is the key rammp-ui's camera bridge reads) and `classes` (`{"<value>": "<fine class>"}`) from
 CameraCapture's segmentation class table. The fused RGBD path (`bStreamRGBD`) sends exactly what it always
 has. `FRammsCameraStreams` (`RammsCameraStreams.h`) holds these conventions as plain functions.
+
+The stream ids, roles and groups match the conventions ramms-tools and rammp-ui use; the message types are
+UE's own (colour is `FrameRGB`, which `URammsStreamSinkComponent` does not turn into a texture: it takes colour
+as `ImageData`). Names are not unique across robots (two robots can each have a `front` camera), so a client
+picks a robot's camera by `actor` (and channel), never by name alone. A role is built and sent only while a
+client wants its channel, so an idle server costs no copies.
+
+The mask is CameraCapture's custom-depth stencil. While segmentation is on, every primitive renders custom
+depth with its class value as stencil, which overwrites stencils something else set: RammsUI's
+`URammsCameraProjectorComponent` filters its target surfaces by stencil (`TargetStencilValue`, 200) and its
+projective grid mesh writes one (`PGMCustomStencilValue`, 1). A world that uses both lists those values in
+`ReservedStencilValues` (`[/Script/CameraCapture.CameraCaptureSegmentationSettings]` in `DefaultGame.ini`):
+surfaces already rendering custom depth with a reserved value keep it and appear in the mask as that value.
 
 ### URammsStreamSinkComponent (ActorComponent)
 
@@ -447,10 +465,18 @@ Low-level TCP server managing the client connection pool.
 
 | Method | Description |
 |---|---|
-| `StartListening()` / `StopListening()` | Start or stop the accept thread. |
-| `BroadcastToSubscribers(Message)` | Send a message to all clients subscribed to the message's channel. Thread-safe. |
-| `SendTo(ConnectionId, Message)` | Send a message to a specific client. |
-| `Tick()` | Game-thread tick: flush outbound, dispatch inbound, cleanup dead connections. |
+| `StartListening()` / `StopListening()` | Start or stop the accept / send thread. `StartListening` refuses a port another program already listens on (`GetLastError()` says so); a port of 0 binds any free one (`GetPort()` then reports it). |
+| `BroadcastToSubscribers(Message)` | Queue a message for all clients subscribed to the message's channel. Thread-safe; never waits on a client. |
+| `SendTo(ConnectionId, Message)` | Queue a message for a specific client. |
+| `HasSubscriber(Channel)` | Whether a connected client would be sent a message on the channel. |
+| `Tick()` | Game-thread tick: dispatch inbound, cleanup dead connections. |
+
+**Send model.** Broadcasting only queues. The send thread copies the connection list under the lock and
+sends outside it; each client's socket is non-blocking and takes what it can, and the rest of a message is
+sent on a later pass, so a slow or stalled client delays only its own streams, never the game thread or other
+clients. A client that takes no data for 5 s while a message waits for it is dropped. A client that cannot
+keep up is sent the latest frame of each stream: a newer frame replaces a queued older one of the same channel
+and type, and at `MaxOutboundQueueSize` the oldest queued frame makes room (control messages are kept).
 
 **Statistics** (atomic counters):
 
@@ -458,8 +484,8 @@ Low-level TCP server managing the client connection pool.
 |---|---|
 | `TotalBytesSent` | Cumulative bytes sent to all clients. |
 | `TotalBytesReceived` | Cumulative bytes received from all clients. |
-| `FramesSent` | Total frames broadcast. |
-| `FramesDropped` | Frames dropped due to full outbound queues. |
+| `FramesSent` | Total messages sent. |
+| `FramesDropped` | Frames dropped from outbound queues: replaced by a newer frame of their stream, or pushed out by a full queue. |
 | `TotalConnectionsAccepted` | Lifetime count of accepted connections. |
 
 ### FRammsStreamConnection (FRunnable)
@@ -470,10 +496,10 @@ Per-client TCP handler running on its own receive thread.
 |---|---|
 | `SubscribedChannels` (`TSet<uint16>`) | Channels this client wants to receive. |
 | `PreferredCompression` | Compression requested by the client (`None`, `LZ4`, `JPEG`, `PNG`). |
-| `EnqueueOutbound(Message, bDropOldest)` | Queue a message for sending. Drops oldest if queue is full (default: 3 messages max). |
-| `FlushOutbound()` | Flush queued messages to the TCP socket (called by server thread). |
+| `EnqueueOutbound(Message, bDropOldest, OutDropped)` | Queue a message for sending: replaces a queued frame of the same channel and type, drops the oldest frame when full. |
+| `FlushOutbound()` | Send what the socket takes now, without waiting (called by the send thread). |
 | `DequeueInbound(OutMessage)` | Retrieve the next received message (thread-safe). |
-| `MaxOutboundQueueSize` | Per-connection back-pressure limit (default: 3). |
+| `MaxOutboundQueueSize` | Messages queued per connection (default: 32). |
 
 ---
 
