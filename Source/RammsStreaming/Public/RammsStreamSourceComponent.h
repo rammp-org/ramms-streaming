@@ -31,11 +31,13 @@ class URammsStreamingSubsystem;
  *   - CameraFilter:    If set, only forward frames from cameras whose ID
  * contains this string (or, with bExactCameraFilter, the camera component of
  * that name on this actor)
- *   - StreamName:      The camera's name in the stream ids and "group"
+ *   - StreamName:      The camera's name in the stream ids and "group" (with
+ * bExactCameraFilter)
  *
  * Colour, depth, motion and mask frames carry the association metadata
- * (stream_id, group, role, name, fmt) described in RammsCameraStreams.h; the
- * RGBD path sends exactly what it always has.
+ * (stream_id, group, role, name, fmt) described in RammsCameraStreams.h, and
+ * "actor", the camera owner's object path; the RGBD path sends exactly what it
+ * always has. A stream is built only while a client wants its channel.
  */
 UCLASS(ClassGroup = (RAMMS), meta = (BlueprintSpawnableComponent))
 class RAMMSSTREAMING_API URammsStreamSourceComponent : public UActorComponent
@@ -87,7 +89,9 @@ public:
 	bool bExactCameraFilter = false;
 
 	/** The camera's name in the stream ids (camera/<name>/color ...) and the
-	 * "group" key. Empty = the camera component's name. */
+	 * "group" key, used with bExactCameraFilter (a substring filter can forward
+	 * several cameras, which would share it). Empty = the camera component's
+	 * name. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming")
 	FString StreamName;
 
@@ -101,8 +105,8 @@ public:
 	static bool CameraMatchesFilter(const FString& Filter, bool bExact, const FCameraIdentifier& Camera,
 		const FString& CameraActorPath, const FString& OwnerActorPath);
 
-	/** The name a camera's streams go out under from this source: StreamName,
-	 * else the camera component's name. */
+	/** The name a camera's streams go out under from this source: StreamName
+	 * (with bExactCameraFilter), else the camera component's name. */
 	FString GetStreamNameFor(const FCameraIdentifier& Camera) const;
 
 	/** The streams this source sends for a camera streamed under
@@ -120,4 +124,7 @@ private:
 	void OnFrameCaptured(TSharedRef<const FCaptureData> Data);
 
 	FDelegateHandle CaptureHandle;
+
+	/** A role's channel was out of range once already (said once, not every frame). */
+	bool bWarnedInvalidChannel = false;
 };

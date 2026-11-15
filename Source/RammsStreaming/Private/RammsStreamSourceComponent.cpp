@@ -96,7 +96,9 @@ bool URammsStreamSourceComponent::AcceptsCamera(
 FString URammsStreamSourceComponent::GetStreamNameFor(
 	const FCameraIdentifier& Camera) const
 {
-	if (!StreamName.IsEmpty())
+	// Only an exact filter forwards a single camera; with a substring filter one StreamName would give several
+	// cameras the same stream ids.
+	if (bExactCameraFilter && !StreamName.IsEmpty())
 	{
 		return StreamName;
 	}
@@ -147,91 +149,91 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 	if (!StreamSub || !StreamSub->IsServerRunning())
 		return;
 
-	const FString CameraStreamName = GetStreamNameFor(Data->CameraID);
-
-	// Depth may be on its own grid; carry those dimensions rather than letting a
-	// client assume the colour ones. Zero means "no depth captured".
-	const int32 DepthW = Data->DepthWidth > 0 ? Data->DepthWidth : Data->Width;
-	const int32 DepthH = Data->DepthHeight > 0 ? Data->DepthHeight : Data->Height;
-
 	if (bStreamRGBD && Data->ImageData.Num() > 0 && Data->DepthData.Num() > 0)
 	{
-		// Combined RGBD, with the metadata it has always had: one message is two
-		// roles, so it carries no single stream id.
-		FString RgbdMeta;
+		if (StreamSub->IsChannelWanted(ChannelID))
 		{
-			const TSharedRef<FJsonObject>										   Base = FRammsCameraStreams::BuildBaseMetadata(*Data);
-			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
-				TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&RgbdMeta);
-			FJsonSerializer::Serialize(Base, Writer);
-		}
+			// Combined RGBD, with the metadata it has always had: one message is two
+			// roles, so it carries no single stream id. Depth may be on its own grid.
+			FString RgbdMeta;
+			{
+				const TSharedRef<FJsonObject>										   Base = FRammsCameraStreams::BuildBaseMetadata(*Data);
+				const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+					TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&RgbdMeta);
+				FJsonSerializer::Serialize(Base, Writer);
+			}
 
-		TArray<uint8> RgbBytes;
-		RgbBytes.SetNumUninitialized(Data->ImageData.Num() * sizeof(FColor));
-		FMemory::Memcpy(RgbBytes.GetData(), Data->ImageData.GetData(),
-			RgbBytes.Num());
-
-		TArray<float> DepthCopy = Data->DepthData;
-		StreamSub->BroadcastRGBDFrame(ChannelID, RgbBytes, DepthCopy, Data->Width,
-			Data->Height, RgbdMeta, DepthW, DepthH);
-	}
-	else
-	{
-		if (bStreamRGB && Data->ImageData.Num() > 0)
-		{
 			TArray<uint8> RgbBytes;
-			RgbBytes.SetNumUninitialized(Data->ImageData.Num() * sizeof(FColor));
-			FMemory::Memcpy(RgbBytes.GetData(), Data->ImageData.GetData(),
-				RgbBytes.Num());
-			StreamSub->BroadcastRGBFrame(ChannelID, RgbBytes, Data->Width,
-				Data->Height,
-				FRammsCameraStreams::BuildFrameMetadataJson(*Data, CameraStreamName, ERammsCameraStreamRole::Color));
-		}
-
-		if (bStreamDepth && Data->DepthData.Num() > 0)
-		{
-			// Use ChannelID + 100 for depth so clients can subscribe independently
-			TArray<float> DepthCopy = Data->DepthData;
-			StreamSub->BroadcastDepthFrame(ChannelID + FRammsCameraStreams::DepthChannelOffset, DepthCopy, DepthW,
-				DepthH,
-				FRammsCameraStreams::BuildFrameMetadataJson(*Data, CameraStreamName, ERammsCameraStreamRole::Depth),
-				DepthW, DepthH);
+			RgbBytes.Append(reinterpret_cast<const uint8*>(Data->ImageData.GetData()),
+				Data->ImageData.Num() * static_cast<int32>(sizeof(FColor)));
+			const int32 DepthW = Data->DepthWidth > 0 ? Data->DepthWidth : Data->Width;
+			const int32 DepthH = Data->DepthHeight > 0 ? Data->DepthHeight : Data->Height;
+			StreamSub->BroadcastRGBDFrame(ChannelID, RgbBytes, Data->DepthData, Data->Width,
+				Data->Height, RgbdMeta, DepthW, DepthH);
 		}
 	}
 
-	// Motion: its own pass and its own grid. FVector2D is double; the wire is
-	// float32 x,y.
-	const int32 MotionPixels = Data->MotionWidth * Data->MotionHeight;
-	if (bStreamMotion && MotionPixels > 0 && Data->MotionVectorData.Num() == MotionPixels)
+	// Each role on its own channel, built only when a client wants that channel: the payload is made once, in its
+	// wire format, and handed over without further copies.
+	TArray<ERammsCameraStreamRole, TInlineAllocator<4>> Roles;
+	if (!bStreamRGBD && bStreamRGB)
 	{
-		TArray<float> MotionFloats;
-		MotionFloats.SetNumUninitialized(MotionPixels * 2);
-		for (int32 Pixel = 0; Pixel < MotionPixels; ++Pixel)
-		{
-			const FVector2D& Velocity = Data->MotionVectorData[Pixel];
-			MotionFloats[Pixel * 2] = static_cast<float>(Velocity.X);
-			MotionFloats[Pixel * 2 + 1] = static_cast<float>(Velocity.Y);
-		}
-		StreamSub->BroadcastMotionFrame(ChannelID + FRammsCameraStreams::MotionChannelOffset, MotionFloats,
-			Data->MotionWidth, Data->MotionHeight,
-			FRammsCameraStreams::BuildFrameMetadataJson(*Data, CameraStreamName, ERammsCameraStreamRole::Motion));
+		Roles.Add(ERammsCameraStreamRole::Color);
+	}
+	if (!bStreamRGBD && bStreamDepth)
+	{
+		Roles.Add(ERammsCameraStreamRole::Depth);
+	}
+	if (bStreamMotion)
+	{
+		Roles.Add(ERammsCameraStreamRole::Motion);
+	}
+	if (bStreamSegmentation)
+	{
+		Roles.Add(ERammsCameraStreamRole::Mask);
 	}
 
-	// Mask: one fine class per pixel on the colour grid, with the class table so
-	// a client can name the values.
-	const int32 ClassPixels = Data->ClassWidth * Data->ClassHeight;
-	if (bStreamSegmentation && ClassPixels > 0 && Data->ClassData.Num() == ClassPixels)
+	FString CameraStreamName;
+	for (const ERammsCameraStreamRole Role : Roles)
 	{
-		const UCameraCaptureSegmentationSubsystem* Labels =
-			GetWorld() ? GetWorld()->GetSubsystem<UCameraCaptureSegmentationSubsystem>() : nullptr;
+		// The role's channel must fit the header's uint16: wrapped, it would land on another stream.
+		const int32 RoleChannel = ChannelID + FRammsCameraStreams::ChannelOffset(Role);
+		if (RoleChannel < 0 || RoleChannel > MAX_uint16)
+		{
+			if (!bWarnedInvalidChannel)
+			{
+				bWarnedInvalidChannel = true;
+				UE_LOG(LogRammsStreamSource, Warning,
+					TEXT("%s: ChannelID %d puts the %s stream on channel %d, outside 0..65535; that stream is not sent"),
+					*GetPathName(), ChannelID, *FRammsCameraStreams::RoleName(Role), RoleChannel);
+			}
+			continue;
+		}
+		if (!FRammsCameraStreams::HasRole(*Data, Role) || !StreamSub->IsChannelWanted(RoleChannel))
+		{
+			continue;
+		}
+		if (CameraStreamName.IsEmpty())
+		{
+			CameraStreamName = GetStreamNameFor(Data->CameraID);
+		}
+
+		// The mask's class table, so a client can name the values.
 		TSharedPtr<const FCameraCaptureSegTable> SegTable;
-		if (Labels)
+		if (Role == ERammsCameraStreamRole::Mask)
 		{
-			SegTable = Labels->GetTable();
+			if (const UCameraCaptureSegmentationSubsystem* Labels =
+					GetWorld() ? GetWorld()->GetSubsystem<UCameraCaptureSegmentationSubsystem>() : nullptr)
+			{
+				SegTable = Labels->GetTable();
+			}
 		}
-		StreamSub->BroadcastFrameData(ChannelID + FRammsCameraStreams::MaskChannelOffset, Data->ClassData,
-			Data->ClassWidth, Data->ClassHeight, FRammsCameraStreams::Format(ERammsCameraStreamRole::Mask),
-			FRammsCameraStreams::BuildFrameMetadataJson(*Data, CameraStreamName, ERammsCameraStreamRole::Mask,
-				SegTable.Get()));
+
+		FRammsCameraFrameOut Frame;
+		if (FRammsCameraStreams::BuildFrame(*Data, CameraStreamName, Role, ChannelID, SegTable.Get(), Frame))
+		{
+			StreamSub->BroadcastEncodedFrame(Frame.Message, Frame.Channel, MoveTemp(Frame.Payload), Frame.Width,
+				Frame.Height, Frame.MetadataJson);
+		}
 	}
 }

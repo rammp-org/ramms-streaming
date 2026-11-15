@@ -208,7 +208,18 @@ FString FRammsCameraStreams::BuildFrameMetadataJson(const FCaptureData& Data, co
 	Json->SetStringField(TEXT("name"), DisplayName(StreamName, Role));
 	Json->SetStringField(TEXT("fmt"), Format(Role));
 
-	if (Role == ERammsCameraStreamRole::Motion)
+	if (Role == ERammsCameraStreamRole::Depth)
+	{
+		// The payload is the depth grid, which need not be the colour grid.
+		const int32 DepthW = Data.DepthWidth > 0 ? Data.DepthWidth : Data.Width;
+		const int32 DepthH = Data.DepthHeight > 0 ? Data.DepthHeight : Data.Height;
+		Json->SetNumberField(TEXT("w"), DepthW);
+		Json->SetNumberField(TEXT("h"), DepthH);
+		Json->SetNumberField(TEXT("depth_w"), DepthW);
+		Json->SetNumberField(TEXT("depth_h"), DepthH);
+		Json->SetStringField(TEXT("unit"), TEXT("cm"));
+	}
+	else if (Role == ERammsCameraStreamRole::Motion)
 	{
 		// The payload is the motion grid, which is its own pass and need not be
 		// the colour grid; "w"/"h" describe the payload, as they do for depth.
@@ -258,4 +269,82 @@ FString FRammsCameraStreams::BuildFrameMetadataJson(const FCaptureData& Data, co
 		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutputString);
 	FJsonSerializer::Serialize(Json, Writer);
 	return OutputString;
+}
+
+bool FRammsCameraStreams::HasRole(const FCaptureData& Data, ERammsCameraStreamRole Role)
+{
+	switch (Role)
+	{
+		case ERammsCameraStreamRole::Depth:
+			return Data.DepthData.Num() > 0;
+		case ERammsCameraStreamRole::Motion:
+			return Data.MotionWidth > 0 && Data.MotionHeight > 0
+				&& Data.MotionVectorData.Num() == Data.MotionWidth * Data.MotionHeight;
+		case ERammsCameraStreamRole::Mask:
+			return Data.ClassWidth > 0 && Data.ClassHeight > 0 && Data.ClassData.Num() == Data.ClassWidth * Data.ClassHeight;
+		case ERammsCameraStreamRole::Color:
+		default:
+			return Data.ImageData.Num() > 0;
+	}
+}
+
+bool FRammsCameraStreams::BuildFrame(const FCaptureData& Data, const FString& StreamName, ERammsCameraStreamRole Role,
+	int32 BaseChannel, const FCameraCaptureSegTable* SegTable, FRammsCameraFrameOut& OutFrame)
+{
+	const int32 Channel = BaseChannel + ChannelOffset(Role);
+	if (Channel < 0 || Channel > MAX_uint16 || !HasRole(Data, Role))
+	{
+		return false;
+	}
+
+	OutFrame.Role = Role;
+	OutFrame.Channel = Channel;
+	OutFrame.Message = MessageType(Role);
+	OutFrame.Payload.Reset();
+	switch (Role)
+	{
+		case ERammsCameraStreamRole::Depth:
+		{
+			OutFrame.Width = Data.DepthWidth > 0 ? Data.DepthWidth : Data.Width;
+			OutFrame.Height = Data.DepthHeight > 0 ? Data.DepthHeight : Data.Height;
+			OutFrame.Payload.Append(reinterpret_cast<const uint8*>(Data.DepthData.GetData()),
+				Data.DepthData.Num() * static_cast<int32>(sizeof(float)));
+			break;
+		}
+		case ERammsCameraStreamRole::Motion:
+		{
+			// FVector2D is double; the wire is float32 x, y.
+			OutFrame.Width = Data.MotionWidth;
+			OutFrame.Height = Data.MotionHeight;
+			const int32 Pixels = Data.MotionVectorData.Num();
+			OutFrame.Payload.SetNumUninitialized(Pixels * 2 * static_cast<int32>(sizeof(float)));
+			float* Out = reinterpret_cast<float*>(OutFrame.Payload.GetData());
+			for (int32 Pixel = 0; Pixel < Pixels; ++Pixel)
+			{
+				const FVector2D& Velocity = Data.MotionVectorData[Pixel];
+				Out[Pixel * 2] = static_cast<float>(Velocity.X);
+				Out[Pixel * 2 + 1] = static_cast<float>(Velocity.Y);
+			}
+			break;
+		}
+		case ERammsCameraStreamRole::Mask:
+		{
+			OutFrame.Width = Data.ClassWidth;
+			OutFrame.Height = Data.ClassHeight;
+			OutFrame.Payload = Data.ClassData;
+			break;
+		}
+		case ERammsCameraStreamRole::Color:
+		default:
+		{
+			// FColor is B, G, R, A in memory: bgra8 as it is.
+			OutFrame.Width = Data.Width;
+			OutFrame.Height = Data.Height;
+			OutFrame.Payload.Append(reinterpret_cast<const uint8*>(Data.ImageData.GetData()),
+				Data.ImageData.Num() * static_cast<int32>(sizeof(FColor)));
+			break;
+		}
+	}
+	OutFrame.MetadataJson = BuildFrameMetadataJson(Data, StreamName, Role, Role == ERammsCameraStreamRole::Mask ? SegTable : nullptr);
+	return true;
 }

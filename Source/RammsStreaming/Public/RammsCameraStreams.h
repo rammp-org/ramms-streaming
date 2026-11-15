@@ -20,10 +20,14 @@ struct FCameraCaptureSegTable;
  * | motion | FrameMotion 0x04  | C+200   | motion/<name>         | rg32f   |
  * | mask   | FrameData 0x11    | C+300   | mask/<name>           | mono8   |
  *
- * These are the stream ids, roles and display names ramms-tools' StreamSender
- * already sends toward UE, so a client reading them -- rammp-ui's camera
- * bridge, ramms-tools -- can associate the four streams of one camera by its
- * "group" without knowing the channel layout.
+ * The stream ids, roles and groups match the conventions ramms-tools and
+ * rammp-ui use, so a client can put the four streams of one camera together by
+ * "group" without knowing the channel layout. The message types are UE's own:
+ * colour goes out as FrameRGB, which RammsStreaming's sink component does not
+ * turn into a texture (it takes colour as ImageData 0x10). Names are not unique
+ * across robots: every frame carries "actor" (the camera owner's object path),
+ * and a client picks a robot's camera by actor (and channel), never by name
+ * alone.
  */
 enum class ERammsCameraStreamRole : uint8
 {
@@ -45,6 +49,19 @@ struct RAMMSSTREAMING_API FRammsCameraStreamDesc
 	FString					Format;
 };
 
+/** One role of one captured frame, ready to send: the payload in the role's wire format and its metadata. */
+struct RAMMSSTREAMING_API FRammsCameraFrameOut
+{
+	ERammsCameraStreamRole	Role = ERammsCameraStreamRole::Color;
+	int32					Channel = 0;
+	ERammsStreamMessageType Message = ERammsStreamMessageType::FrameRGB;
+	/** The payload's grid: the colour, depth, motion or class-mask grid. */
+	int32		  Width = 0;
+	int32		  Height = 0;
+	TArray<uint8> Payload;
+	FString		  MetadataJson;
+};
+
 /**
  * The stream conventions above as plain functions, shared by the stream source
  * (which sends) and anything that describes what is sent (RammsCore's sensor
@@ -59,6 +76,12 @@ struct RAMMSSTREAMING_API FRammsCameraStreams
 
 	/** Highest channel offset; a base channel above 65535 minus this does not fit a uint16 header. */
 	static constexpr int32 MaxChannelOffset = MaskChannelOffset;
+
+	/** Highest base channel whose four channels all fit the header's uint16. */
+	static constexpr int32 MaxBaseChannel = MAX_uint16 - MaxChannelOffset;
+
+	/** Whether all four channels of base channel C fit the header: 0 <= C <= MaxBaseChannel. */
+	static bool IsValidBaseChannel(int32 BaseChannel) { return BaseChannel >= 0 && BaseChannel <= MaxBaseChannel; }
 
 	static const TArray<ERammsCameraStreamRole>& AllRoles();
 
@@ -89,14 +112,15 @@ struct RAMMSSTREAMING_API FRammsCameraStreams
 	 *
 	 * Every role keeps the keys the source has always sent (w, h, depth_w,
 	 * depth_h, frame, timestamp, camera, actor, transform, intrinsics) and adds
-	 * the association keys stream_id, group, role, name and fmt. Motion and mask
-	 * frames describe their own payload: "w"/"h" become the motion grid (plus
-	 * motion_w/motion_h) or the class-mask grid. Mask frames add
+	 * the association keys stream_id, group, role, name and fmt. "actor" is the
+	 * camera owner's object path. "w"/"h" describe the payload: the colour grid,
+	 * the depth grid (with "unit": "cm"), the motion grid (with motion_w /
+	 * motion_h and "unit": "px/frame") or the class-mask grid. Mask frames add
 	 * material_params and MaterialScalarParameters ({"NumSegmentIDs": highest
 	 * class value + 1}; the second key is the one rammp-ui's camera bridge and
-	 * ramms-tools' StreamSender use on the wire) and classes
-	 * ({"<value>": "<fine class>"}) from SegTable. Without a table the mask's
-	 * NumSegmentIDs is its highest pixel value + 1 and classes is empty.
+	 * ramms-tools' StreamSender use) and classes ({"<value>": "<fine class>"})
+	 * from SegTable. Without a table the mask's NumSegmentIDs is its highest
+	 * pixel value + 1 and classes is empty.
 	 */
 	static FString BuildFrameMetadataJson(const FCaptureData& Data, const FString& StreamName, ERammsCameraStreamRole Role,
 		const FCameraCaptureSegTable* SegTable = nullptr);
@@ -106,4 +130,16 @@ struct RAMMSSTREAMING_API FRammsCameraStreams
 
 	/** Highest fine class value in the table + 1 (1 when only "unlabeled" is defined). */
 	static int32 NumSegmentIds(const FCameraCaptureSegTable& SegTable);
+
+	/** Whether Data carries the plane Role sends: colour pixels, depth, a full motion grid, a full class mask. */
+	static bool HasRole(const FCaptureData& Data, ERammsCameraStreamRole Role);
+
+	/**
+	 * One role of a captured frame as the message a source sends for it on BaseChannel's channel for that role:
+	 * the payload in the role's wire format (bgra8 colour, float32 depth in cm, rg32f motion from the capture's
+	 * double-precision vectors, mono8 classes) and BuildFrameMetadataJson's metadata. False when Data has no such
+	 * plane (HasRole) or the role's channel does not fit the header (0..65535).
+	 */
+	static bool BuildFrame(const FCaptureData& Data, const FString& StreamName, ERammsCameraStreamRole Role,
+		int32 BaseChannel, const FCameraCaptureSegTable* SegTable, FRammsCameraFrameOut& OutFrame);
 };
