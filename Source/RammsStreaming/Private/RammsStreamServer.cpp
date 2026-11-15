@@ -216,6 +216,10 @@ void FRammsStreamServer::OnClientConnected(FSocket* ClientSocket)
 	// buffer size is NOT inherited by accepted sockets on all platforms).
 	int32 ActualRecvSize = 0;
 	ClientSocket->SetReceiveBufferSize(2 * 1024 * 1024, ActualRecvSize);
+	// And a send buffer that holds a camera's frame set (colour, depth, motion, mask of a 640x480 camera is ~5 MB),
+	// so outbound frames rarely meet back-pressure; SendAll waits through it when they do.
+	int32 ActualSendSize = 0;
+	ClientSocket->SetSendBufferSize(4 * 1024 * 1024, ActualSendSize);
 
 	const uint32					   ConnId = NextConnectionId++;
 	TSharedPtr<FRammsStreamConnection> Conn =

@@ -343,15 +343,40 @@ void FRammsStreamConnection::EnsureInboundRingCapacity(int32 Cap)
 
 bool FRammsStreamConnection::SendAll(const uint8* Data, int32 Len)
 {
-	int32 TotalSent = 0;
+	// The listen socket is non-blocking and an accepted socket inherits that on Windows, so a frame larger than the
+	// socket's send buffer (a 640x480 colour frame is 1.2 MB) fills it and Send fails with EWOULDBLOCK. That is
+	// back-pressure, not a dead peer: wait until the socket can take more and carry on, up to a deadline.
+	constexpr double SendStallTimeoutSeconds = 5.0;
+	double			 StallStart = -1.0;
+	int32			 TotalSent = 0;
 	while (TotalSent < Len)
 	{
 		int32 BytesSent = 0;
-		if (!Socket->Send(Data + TotalSent, Len - TotalSent, BytesSent))
+		if (Socket->Send(Data + TotalSent, Len - TotalSent, BytesSent) && BytesSent > 0)
 		{
+			TotalSent += BytesSent;
+			StallStart = -1.0;
+			continue;
+		}
+		const ESocketErrors Error = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->GetLastErrorCode();
+		if (Error != SE_EWOULDBLOCK && Error != SE_NO_ERROR)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("RMSS: Send error %d on connection %u after %d of %d bytes"),
+				static_cast<int32>(Error), ConnectionId, TotalSent, Len);
 			return false;
 		}
-		TotalSent += BytesSent;
+		const double Now = FPlatformTime::Seconds();
+		if (StallStart < 0.0)
+		{
+			StallStart = Now;
+		}
+		if (bStopping || Now - StallStart > SendStallTimeoutSeconds)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("RMSS: Connection %u stalled for %.1f s with %d of %d bytes sent; dropping it"),
+				ConnectionId, Now - StallStart, TotalSent, Len);
+			return false;
+		}
+		Socket->Wait(ESocketWaitConditions::WaitForWrite, FTimespan::FromMilliseconds(20));
 	}
 	return true;
 }
