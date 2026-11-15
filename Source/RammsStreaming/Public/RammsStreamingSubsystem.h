@@ -49,6 +49,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	int32 GetServerPort() const;
 
+	/** Why the last StartServer failed (a port another program listens on, say); "" after a success. */
+	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
+	FString GetLastServerError() const { return LastServerError; }
+
+	/** True when the server is running and a connected client would be sent a frame on ChannelID (it subscribed
+	 *  to that channel, or to none, which means all). Frame broadcasts to a channel nobody wants are skipped. */
+	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
+	bool IsChannelWanted(int32 ChannelID) const;
+
 	// ── Compression configuration ───────────────────────────────────
 
 	/** Enable JPEG compression for RGB frames and LZ4 for depth. */
@@ -70,10 +79,12 @@ public:
 		meta = (ClampMin = "0"))
 	int32 MaxInboundQueueSize = 0;
 
-	/** Maximum outbound messages buffered per connection before oldest are dropped. */
+	/** Maximum outbound messages queued per connection. A client is sent the latest frame of each stream (a newer
+	 *  frame replaces a queued older one of the same channel), so this bounds how many streams can wait at once;
+	 *  past it the oldest queued frame is dropped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming",
 		meta = (ClampMin = "1"))
-	int32 MaxOutboundQueueSize = 3;
+	int32 MaxOutboundQueueSize = 32;
 
 	// ── Frame broadcasting ───────────────────────────────────────────
 
@@ -141,6 +152,16 @@ public:
 		int32 Width, int32 Height, const FString& Format,
 		const FString& MetadataJson = TEXT(""));
 
+	/**
+	 * C++: broadcast a frame whose payload is already in its wire format, taking the payload over (no copy).
+	 * MetadataJson is sent as given, so it must describe the payload ("w", "h", "fmt" ...). FrameRGB (BGRA8 of
+	 * Width x Height) and FrameDepth payloads are JPEG / LZ4 compressed like BroadcastRGBFrame and
+	 * BroadcastDepthFrame when bEnableCompression is on; any other type is sent as is. Skipped when nobody
+	 * subscribes to ChannelID.
+	 */
+	void BroadcastEncodedFrame(ERammsStreamMessageType Type, int32 ChannelID, TArray<uint8>&& Payload, int32 Width,
+		int32 Height, const FString& MetadataJson);
+
 	// ── Events ───────────────────────────────────────────────────────
 
 	/** Fired on the game thread when an inbound message arrives from a client. */
@@ -167,6 +188,12 @@ private:
 
 	/** Internal: build and broadcast a message. */
 	void BroadcastMessage(TSharedRef<FRammsStreamMessage> Msg);
+
+	/** A frame message of Type on ChannelID with its sequence number and timestamp, or null when the channel is
+	 *  out of range or nobody would be sent it. */
+	TSharedPtr<FRammsStreamMessage> NewFrameMessage(ERammsStreamMessageType Type, int32 ChannelID);
+
+	FString LastServerError;
 
 	/** Atomic sequence counter per channel. */
 	TMap<uint16, uint32> SequenceCounters;

@@ -65,6 +65,14 @@ bool URammsStreamingSubsystem::StartServer(int32 Port, int32 MaxClients)
 		return true;
 	}
 
+	LastServerError.Reset();
+	if (Port < 0 || Port > MAX_uint16)
+	{
+		LastServerError = FString::Printf(TEXT("port %d is not a TCP port"), Port);
+		UE_LOG(LogRammsStreamSub, Error, TEXT("Failed to start RMSS server: %s"), *LastServerError);
+		return false;
+	}
+
 	Server =
 		MakeUnique<FRammsStreamServer>(static_cast<uint16>(Port), MaxClients);
 
@@ -86,13 +94,20 @@ bool URammsStreamingSubsystem::StartServer(int32 Port, int32 MaxClients)
 
 	if (!Server->StartListening())
 	{
+		LastServerError = Server->GetLastError();
 		UE_LOG(LogRammsStreamSub, Error,
-			TEXT("Failed to start RMSS server on port %d"), Port);
+			TEXT("Failed to start RMSS server on port %d: %s"), Port, *LastServerError);
 		Server.Reset();
 		return false;
 	}
 
 	return true;
+}
+
+bool URammsStreamingSubsystem::IsChannelWanted(int32 ChannelID) const
+{
+	return Server.IsValid() && Server->IsListening() && ChannelID >= 0 && ChannelID <= MAX_uint16
+		&& Server->HasSubscriber(static_cast<uint16>(ChannelID));
 }
 
 void URammsStreamingSubsystem::StopServer()
@@ -150,6 +165,103 @@ void URammsStreamingSubsystem::BroadcastMessage(
 	Server->BroadcastToSubscribers(Msg);
 }
 
+namespace RammsStreamingSubsystemImpl
+{
+	/** Microseconds since the Unix epoch, from one clock reading (two readings could straddle a second). */
+	int64 NowMicroseconds()
+	{
+		const FTimespan SinceEpoch = FDateTime::UtcNow() - FDateTime(1970, 1, 1);
+		return SinceEpoch.GetTicks() / ETimespan::TicksPerMicrosecond;
+	}
+
+	/** Bytes per pixel of a FrameData "fmt" this plugin knows, else 0. */
+	int32 FrameFormatBytesPerPixel(const FString& Format)
+	{
+		const FString Fmt = Format.ToLower();
+		if (Fmt == TEXT("mono8") || Fmt == TEXT("r8") || Fmt == TEXT("gray8") || Fmt == TEXT("u8"))
+		{
+			return 1;
+		}
+		if (Fmt == TEXT("mono16") || Fmt == TEXT("uint16") || Fmt == TEXT("16uc1") || Fmt == TEXT("g16"))
+		{
+			return 2;
+		}
+		if (Fmt == TEXT("rgb8") || Fmt == TEXT("bgr8"))
+		{
+			return 3;
+		}
+		if (Fmt == TEXT("float32") || Fmt == TEXT("r32f") || Fmt == TEXT("bgra8") || Fmt == TEXT("rgba8"))
+		{
+			return 4;
+		}
+		if (Fmt == TEXT("rg32f") || Fmt == TEXT("float32x2"))
+		{
+			return 8;
+		}
+		return 0;
+	}
+} // namespace RammsStreamingSubsystemImpl
+
+TSharedPtr<FRammsStreamMessage> URammsStreamingSubsystem::NewFrameMessage(ERammsStreamMessageType Type, int32 ChannelID)
+{
+	if (ChannelID < 0 || ChannelID > MAX_uint16)
+	{
+		UE_LOG(LogRammsStreamSub, Warning, TEXT("Frame dropped: channel %d is outside 0..65535"), ChannelID);
+		return nullptr;
+	}
+	// Nobody to send it to: skip the copies and compression a frame costs.
+	if (!IsChannelWanted(ChannelID))
+	{
+		return nullptr;
+	}
+	TSharedRef<FRammsStreamMessage> Msg = MakeShared<FRammsStreamMessage>();
+	Msg->Header.MessageType = Type;
+	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
+	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
+	Msg->Header.Timestamp = RammsStreamingSubsystemImpl::NowMicroseconds();
+	return Msg;
+}
+
+void URammsStreamingSubsystem::BroadcastEncodedFrame(ERammsStreamMessageType Type, int32 ChannelID,
+	TArray<uint8>&& Payload, int32 Width, int32 Height, const FString& MetadataJson)
+{
+	const TSharedPtr<FRammsStreamMessage> NewMsg = NewFrameMessage(Type, ChannelID);
+	if (!NewMsg.IsValid())
+	{
+		return;
+	}
+	const TSharedRef<FRammsStreamMessage> Msg = NewMsg.ToSharedRef();
+
+	// The same optional compression as BroadcastRGBFrame / BroadcastDepthFrame; the header says which was used,
+	// and the metadata keeps describing the uncompressed pixels.
+	if (bEnableCompression && Type == ERammsStreamMessageType::FrameRGB && Width > 0 && Height > 0
+		&& Payload.Num() == Width * Height * 4)
+	{
+		TArray<uint8> Compressed = CompressJPEG(Payload, Width, Height, JpegQuality);
+		if (Compressed.Num() > 0)
+		{
+			Msg->Header.SetCompression(ERammsStreamCompression::JPEG);
+			Payload = MoveTemp(Compressed);
+		}
+	}
+	else if (bEnableCompression && Type == ERammsStreamMessageType::FrameDepth)
+	{
+		TArray<uint8> Compressed = CompressLZ4(Payload.GetData(), Payload.Num());
+		if (Compressed.Num() > 0)
+		{
+			Msg->Header.SetCompression(ERammsStreamCompression::LZ4);
+			Payload = MoveTemp(Compressed);
+		}
+	}
+
+	Msg->Payload = MoveTemp(Payload);
+	Msg->SetMetadataString(MetadataJson);
+	Msg->Header.PayloadLen = Msg->Payload.Num();
+	Msg->Header.MetadataLen = Msg->Metadata.Num();
+
+	BroadcastMessage(Msg);
+}
+
 namespace
 {
 	/**
@@ -202,11 +314,12 @@ void URammsStreamingSubsystem::BroadcastRGBFrame(int32 ChannelID,
 	int32 Width, int32 Height,
 	const FString& MetadataJson)
 {
-	auto Msg = MakeShared<FRammsStreamMessage>();
-	Msg->Header.MessageType = ERammsStreamMessageType::FrameRGB;
-	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
-	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
-	Msg->Header.Timestamp = FDateTime::UtcNow().ToUnixTimestamp() * 1000000LL + FDateTime::UtcNow().GetMillisecond() * 1000LL;
+	const TSharedPtr<FRammsStreamMessage> NewMsg = NewFrameMessage(ERammsStreamMessageType::FrameRGB, ChannelID);
+	if (!NewMsg.IsValid())
+	{
+		return;
+	}
+	const TSharedRef<FRammsStreamMessage> Msg = NewMsg.ToSharedRef();
 
 	// Build metadata: include width/height at minimum
 	FString Meta = MetadataJson;
@@ -253,11 +366,12 @@ void URammsStreamingSubsystem::BroadcastDepthFrame(
 	const int32 PayloadW = DepthWidth > 0 ? DepthWidth : Width;
 	const int32 PayloadH = DepthHeight > 0 ? DepthHeight : Height;
 
-	auto Msg = MakeShared<FRammsStreamMessage>();
-	Msg->Header.MessageType = ERammsStreamMessageType::FrameDepth;
-	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
-	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
-	Msg->Header.Timestamp = FDateTime::UtcNow().ToUnixTimestamp() * 1000000LL + FDateTime::UtcNow().GetMillisecond() * 1000LL;
+	const TSharedPtr<FRammsStreamMessage> NewMsg = NewFrameMessage(ERammsStreamMessageType::FrameDepth, ChannelID);
+	if (!NewMsg.IsValid())
+	{
+		return;
+	}
+	const TSharedRef<FRammsStreamMessage> Msg = NewMsg.ToSharedRef();
 
 	// Reinterpret float array as bytes
 	const int32 ByteCount = DepthData.Num() * sizeof(float);
@@ -309,11 +423,12 @@ void URammsStreamingSubsystem::BroadcastRGBDFrame(
 	const int32 DepthW = DepthWidth > 0 ? DepthWidth : Width;
 	const int32 DepthH = DepthHeight > 0 ? DepthHeight : Height;
 
-	auto Msg = MakeShared<FRammsStreamMessage>();
-	Msg->Header.MessageType = ERammsStreamMessageType::FrameRGBD;
-	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
-	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
-	Msg->Header.Timestamp = FDateTime::UtcNow().ToUnixTimestamp() * 1000000LL + FDateTime::UtcNow().GetMillisecond() * 1000LL;
+	const TSharedPtr<FRammsStreamMessage> NewMsg = NewFrameMessage(ERammsStreamMessageType::FrameRGBD, ChannelID);
+	if (!NewMsg.IsValid())
+	{
+		return;
+	}
+	const TSharedRef<FRammsStreamMessage> Msg = NewMsg.ToSharedRef();
 
 	const int32 DepthBytes = DepthData.Num() * sizeof(float);
 
@@ -400,11 +515,12 @@ void URammsStreamingSubsystem::BroadcastMotionFrame(int32 ChannelID,
 		return;
 	}
 
-	auto Msg = MakeShared<FRammsStreamMessage>();
-	Msg->Header.MessageType = ERammsStreamMessageType::FrameMotion;
-	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
-	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
-	Msg->Header.Timestamp = FDateTime::UtcNow().ToUnixTimestamp() * 1000000LL + FDateTime::UtcNow().GetMillisecond() * 1000LL;
+	const TSharedPtr<FRammsStreamMessage> NewMsg = NewFrameMessage(ERammsStreamMessageType::FrameMotion, ChannelID);
+	if (!NewMsg.IsValid())
+	{
+		return;
+	}
+	const TSharedRef<FRammsStreamMessage> Msg = NewMsg.ToSharedRef();
 
 	// The payload is the motion grid, so "w"/"h" describe it, as they describe
 	// the depth grid on a depth frame.
@@ -430,23 +546,29 @@ void URammsStreamingSubsystem::BroadcastFrameData(int32 ChannelID,
 	const TArray<uint8>& Data, int32 Width, int32 Height,
 	const FString& Format, const FString& MetadataJson)
 {
-	if (Width <= 0 || Height <= 0 || Data.Num() == 0)
+	const FString Fmt = Format.IsEmpty() ? FString(TEXT("mono8")) : Format;
+	// A format this plugin knows must fill the grid exactly, or no client can reshape it; others are only
+	// required to be non-empty.
+	const int32 BytesPerPixel = RammsStreamingSubsystemImpl::FrameFormatBytesPerPixel(Fmt);
+	const int64 Expected = static_cast<int64>(Width) * static_cast<int64>(Height) * BytesPerPixel;
+	if (Width <= 0 || Height <= 0 || Data.Num() == 0 || (BytesPerPixel > 0 && Data.Num() != Expected))
 	{
 		UE_LOG(LogRammsStreamSub, Warning,
-			TEXT("FrameData on channel %d dropped: %d bytes for a %dx%d grid"),
-			ChannelID, Data.Num(), Width, Height);
+			TEXT("FrameData on channel %d dropped: %d bytes for a %dx%d %s grid"),
+			ChannelID, Data.Num(), Width, Height, *Fmt);
 		return;
 	}
 
-	auto Msg = MakeShared<FRammsStreamMessage>();
-	Msg->Header.MessageType = ERammsStreamMessageType::FrameData;
-	Msg->Header.ChannelID = static_cast<uint16>(ChannelID);
-	Msg->Header.SequenceNum = GetNextSequence(static_cast<uint16>(ChannelID));
-	Msg->Header.Timestamp = FDateTime::UtcNow().ToUnixTimestamp() * 1000000LL + FDateTime::UtcNow().GetMillisecond() * 1000LL;
+	const TSharedPtr<FRammsStreamMessage> NewMsg = NewFrameMessage(ERammsStreamMessageType::FrameData, ChannelID);
+	if (!NewMsg.IsValid())
+	{
+		return;
+	}
+	const TSharedRef<FRammsStreamMessage> Msg = NewMsg.ToSharedRef();
 
 	const FString Meta = MergeStreamMetadata(MetadataJson,
 		{ { TEXT("w"), (double)Width }, { TEXT("h"), (double)Height } },
-		{ { TEXT("fmt"), Format.IsEmpty() ? FString(TEXT("mono8")) : Format } });
+		{ { TEXT("fmt"), Fmt } });
 
 	Msg->Payload = Data;
 
