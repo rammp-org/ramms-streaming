@@ -33,7 +33,8 @@ public:
 	bool IsConnected() const { return bConnected; }
 
 	// ── Subscriptions ────────────────────────────────────────────────
-	/** Channels this client wants to receive. Empty = receive nothing. */
+	/** Channels this client wants to receive. Empty = every channel (a client that never subscribes is sent all
+	 *  of them). Guarded by the server's connection lock. */
 	TSet<uint16> SubscribedChannels;
 
 	/** Preferred compression for outbound frames. */
