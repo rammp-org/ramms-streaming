@@ -2,6 +2,7 @@
 
 #include "RammsStreamConnection.h"
 #include "HAL/RunnableThread.h"
+#include "Misc/ScopeExit.h"
 #include "SocketSubsystem.h"
 #include "Sockets.h"
 
@@ -90,22 +91,23 @@ uint32 FRammsStreamConnection::Run()
 			continue;
 		}
 
+		// FSocket::Recv on a stream socket returns false both for an error and for the peer closing (zero bytes),
+		// and true with zero bytes when a non-blocking socket had nothing after all. Accepted sockets are
+		// non-blocking (see FRammsStreamServer::OnClientConnected), so the latter is not a close.
 		int32 BytesRead = 0;
 		if (!Socket->Recv(ChunkBuffer.GetData(), RECV_CHUNK_SIZE, BytesRead))
 		{
-			UE_LOG(LogTemp, Warning,
-				TEXT("RMSS: Recv error on connection %u (buffer=%d bytes), "
-					 "disconnecting"),
+			UE_LOG(LogTemp, Log,
+				TEXT("RMSS: Connection %u closed by the peer or failed (buffer=%d bytes)"),
 				ConnectionId, RecvBuffer.Num());
 			break;
 		}
 
 		if (BytesRead == 0)
 		{
-			UE_LOG(LogTemp, Log, TEXT("RMSS: Connection %u closed gracefully"),
-				ConnectionId);
-			break;
+			continue;
 		}
+		ReceivedBytes += static_cast<uint64>(BytesRead);
 
 		// Append to receive buffer
 		const int32 OldSize = RecvBuffer.Num();
@@ -196,46 +198,257 @@ void FRammsStreamConnection::Stop()
 // Outbound queue
 // ---------------------------------------------------------------------------
 
-bool FRammsStreamConnection::EnqueueOutbound(
-	const TSharedRef<FRammsStreamMessage>& Message, bool bDropOldest)
+namespace RammsStreamConnectionImpl
 {
-	FScopeLock Lock(&OutboundLock);
-	if (OutboundQueue.Num() >= MaxOutboundQueueSize)
+	/** Frames may be superseded or dropped under back-pressure; control messages may not. */
+	bool IsDroppableFrame(const FRammsStreamMessage& Message)
 	{
-		if (bDropOldest)
+		return GetFrameCategory(Message.Header.MessageType) != ERammsFrameCategory::Control;
+	}
+} // namespace RammsStreamConnectionImpl
+
+bool FRammsStreamConnection::EnqueueOutbound(
+	const TSharedRef<FRammsStreamMessage>& Message, bool bDropOldest, int32* OutDropped, uint64 StreamKey)
+{
+	using RammsStreamConnectionImpl::IsDroppableFrame;
+
+	int32 Dropped = 0;
+	bool  bQueued = true;
+	{
+		FScopeLock Lock(&OutboundLock);
+		int32	   SameStream = INDEX_NONE;
+		if (bDropOldest && IsDroppableFrame(*Message))
 		{
-			OutboundQueue.RemoveAt(0);
+			// A newer frame of the same stream takes the place of one still waiting, so a slow client is sent the
+			// latest of every stream instead of working through a backlog. In place, not moved to the back: each
+			// stream keeps its turn, so the streams queued last in a tick (a camera's mask after its colour, depth
+			// and motion; an IMU feed) are not starved by the ones queued before them. The stream key keeps the
+			// cameras a source sends on one channel apart.
+			const uint16				  Channel = Message->Header.ChannelID;
+			const ERammsStreamMessageType Type = Message->Header.MessageType;
+			SameStream = OutboundQueue.IndexOfByPredicate([Channel, Type, StreamKey](const FQueuedOutbound& Queued) {
+				return Queued.StreamKey == StreamKey && Queued.Message->Header.ChannelID == Channel
+					&& Queued.Message->Header.MessageType == Type;
+			});
+		}
+		if (SameStream != INDEX_NONE)
+		{
+			OutboundQueue[SameStream].Message = Message;
+			++Dropped;
 		}
 		else
 		{
-			return false;
+			if (OutboundQueue.Num() >= FMath::Max(1, MaxOutboundQueueSize))
+			{
+				// Make room with the oldest frame; acks and pongs stay. With only control messages queued, a frame
+				// is refused rather than one of them dropped (and a control message replaces the oldest one, so a
+				// client that only pings cannot grow the queue).
+				const int32 OldestFrame = bDropOldest
+					? OutboundQueue.IndexOfByPredicate([](const FQueuedOutbound& Queued) {
+						  return IsDroppableFrame(*Queued.Message);
+					  })
+					: INDEX_NONE;
+				if (OldestFrame != INDEX_NONE)
+				{
+					OutboundQueue.RemoveAt(OldestFrame);
+				}
+				else if (bDropOldest && !IsDroppableFrame(*Message))
+				{
+					OutboundQueue.RemoveAt(0);
+				}
+				else
+				{
+					bQueued = false;
+				}
+				++Dropped;
+			}
+			if (bQueued)
+			{
+				OutboundQueue.Add(FQueuedOutbound{ Message, StreamKey });
+			}
 		}
 	}
-	OutboundQueue.Add(Message);
-	return true;
+	if (OutDropped)
+	{
+		*OutDropped = Dropped;
+	}
+	return bQueued;
 }
 
-int32 FRammsStreamConnection::FlushOutbound()
+bool FRammsStreamConnection::HasPendingOutbound() const
 {
-	TArray<TSharedRef<FRammsStreamMessage>> ToSend;
+	if (InFlight.IsValid())
 	{
-		FScopeLock Lock(&OutboundLock);
-		Swap(ToSend, OutboundQueue);
+		return true;
+	}
+	FScopeLock Lock(&OutboundLock);
+	return OutboundQueue.Num() > 0;
+}
+
+void FRammsStreamConnection::GetQueuedOutbound(TArray<TSharedRef<FRammsStreamMessage>>& OutMessages) const
+{
+	FScopeLock Lock(&OutboundLock);
+	OutMessages.Reset(OutboundQueue.Num());
+	for (const FQueuedOutbound& Queued : OutboundQueue)
+	{
+		OutMessages.Add(Queued.Message);
+	}
+}
+
+void FRammsStreamConnection::ApplySubscription(bool bSubscribe, bool bListed, const TArray<uint16>& Channels)
+{
+	if (bSubscribe)
+	{
+		if (!bListed)
+		{
+			// Every channel.
+			bSubscribedToAll = true;
+			UnsubscribedChannels.Reset();
+			SubscribedChannels.Reset();
+		}
+		else if (bSubscribedToAll)
+		{
+			for (const uint16 Channel : Channels)
+			{
+				UnsubscribedChannels.Remove(Channel);
+			}
+		}
+		else
+		{
+			for (const uint16 Channel : Channels)
+			{
+				SubscribedChannels.Add(Channel);
+			}
+		}
+		return;
 	}
 
-	int32 Sent = 0;
-	for (const auto& Msg : ToSend)
+	if (!bListed)
 	{
-		TArray<uint8> Bytes = Msg->Serialize();
-		if (!SendAll(Bytes.GetData(), Bytes.Num()))
-		{
-			// Send failed — connection likely dead
-			bConnected = false;
-			break;
-		}
-		++Sent;
+		// Nothing any more.
+		bSubscribedToAll = false;
+		UnsubscribedChannels.Reset();
+		SubscribedChannels.Reset();
 	}
-	return Sent;
+	else if (bSubscribedToAll)
+	{
+		for (const uint16 Channel : Channels)
+		{
+			UnsubscribedChannels.Add(Channel);
+		}
+	}
+	else
+	{
+		for (const uint16 Channel : Channels)
+		{
+			SubscribedChannels.Remove(Channel);
+		}
+	}
+}
+
+void FRammsStreamConnection::FailSend(const TCHAR* Why)
+{
+	UE_LOG(LogTemp, Warning, TEXT("RMSS: Dropping connection %u: %s"), ConnectionId, Why);
+	InFlight.Reset();
+	bConnected = false;
+}
+
+int32 FRammsStreamConnection::FlushOutbound(int64* OutBytesSent)
+{
+	// Never waits. The listen socket is non-blocking, an accepted socket is made non-blocking too, and a frame
+	// larger than the socket's send buffer (a 640x480 colour frame is 1.2 MB) fills it: that is back-pressure, not
+	// a dead client. What the socket does not take now is sent on a later call, from where it stopped, while the
+	// send thread serves the other clients in between.
+	int32 Completed = 0;
+	int64 Sent = 0;
+	ON_SCOPE_EXIT
+	{
+		if (OutBytesSent)
+		{
+			*OutBytesSent = Sent;
+		}
+	};
+	while (!bStopping && bConnected)
+	{
+		if (!InFlight.IsValid())
+		{
+			{
+				FScopeLock Lock(&OutboundLock);
+				if (OutboundQueue.Num() == 0)
+				{
+					return Completed;
+				}
+				InFlight = OutboundQueue[0].Message;
+				OutboundQueue.RemoveAt(0, EAllowShrinking::No);
+			}
+			FRammsStreamHeader Header = InFlight->Header;
+			Header.MetadataLen = static_cast<uint32>(InFlight->Metadata.Num());
+			Header.PayloadLen = static_cast<uint32>(InFlight->Payload.Num());
+			Header.ToBytes(InFlightHeader);
+			InFlightOffset = 0;
+			LastSendProgressSeconds = FPlatformTime::Seconds();
+		}
+
+		const int64 HeaderBytes = FRammsStreamHeader::HEADER_SIZE;
+		const int64 MetadataBytes = InFlight->Metadata.Num();
+		const int64 TotalBytes = HeaderBytes + MetadataBytes + InFlight->Payload.Num();
+		while (InFlightOffset < TotalBytes)
+		{
+			const uint8* Data = nullptr;
+			int64		 Remaining = 0;
+			if (InFlightOffset < HeaderBytes)
+			{
+				Data = InFlightHeader + InFlightOffset;
+				Remaining = HeaderBytes - InFlightOffset;
+			}
+			else if (InFlightOffset < HeaderBytes + MetadataBytes)
+			{
+				Data = InFlight->Metadata.GetData() + (InFlightOffset - HeaderBytes);
+				Remaining = HeaderBytes + MetadataBytes - InFlightOffset;
+			}
+			else
+			{
+				Data = InFlight->Payload.GetData() + (InFlightOffset - HeaderBytes - MetadataBytes);
+				Remaining = TotalBytes - InFlightOffset;
+			}
+
+			int32 BytesSent = 0;
+			if (Socket->Send(Data, static_cast<int32>(Remaining), BytesSent) && BytesSent > 0)
+			{
+				InFlightOffset += BytesSent;
+				Sent += BytesSent;
+				LastSendProgressSeconds = FPlatformTime::Seconds();
+				continue;
+			}
+
+			const ESocketErrors Error = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->GetLastErrorCode();
+			if (bStopping)
+			{
+				// Being closed (RequestStop shut the socket down): not a failure worth reporting.
+				InFlight.Reset();
+				return Completed;
+			}
+			if (Error != SE_EWOULDBLOCK && Error != SE_NO_ERROR)
+			{
+				FailSend(*FString::Printf(TEXT("send error %d after %lld of %lld bytes of a message"),
+					static_cast<int32>(Error), InFlightOffset, TotalBytes));
+				return Completed;
+			}
+			const double Stalled = FPlatformTime::Seconds() - LastSendProgressSeconds;
+			if (Stalled > SendStallTimeoutSeconds)
+			{
+				FailSend(*FString::Printf(TEXT("it took no data for %.1f s (%lld of %lld bytes of a message sent)"),
+					Stalled, InFlightOffset, TotalBytes));
+				return Completed;
+			}
+			// The socket is full: carry on from here on a later pass.
+			return Completed;
+		}
+
+		InFlight.Reset();
+		++Completed;
+	}
+	return Completed;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,23 +548,4 @@ void FRammsStreamConnection::EnsureInboundRingCapacity(int32 Cap)
 	InboundRing = MoveTemp(Tmp);
 	InboundHead = 0;
 	InboundCount = Keep;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-bool FRammsStreamConnection::SendAll(const uint8* Data, int32 Len)
-{
-	int32 TotalSent = 0;
-	while (TotalSent < Len)
-	{
-		int32 BytesSent = 0;
-		if (!Socket->Send(Data + TotalSent, Len - TotalSent, BytesSent))
-		{
-			return false;
-		}
-		TotalSent += BytesSent;
-	}
-	return true;
 }

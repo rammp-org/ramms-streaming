@@ -119,7 +119,7 @@ flowchart LR
     style CAM fill:#1e8449,color:#fff
 ```
 
-1. **External client** connects to TCP port 30030, sends `Subscribe` control message for desired channels, then streams RMSS frame messages
+1. **External client** connects to TCP port 30030 and streams RMSS frame messages into UE (sending needs no `Subscribe`; a client that never subscribes is sent no frames back)
 2. **Connection** receive thread parses the RMSS binary protocol and queues complete messages
 3. **Server.Tick()** (called on the game thread) dequeues inbound messages and fires `OnNativeMessageReceived`
 4. **SinkComponent** matches channel IDs, decompresses payloads, and creates/updates `UTexture2D` (BGRA8 for color, R32F for depth, or arbitrary format via `"fmt"` metadata)
@@ -247,8 +247,8 @@ flowchart LR
 | **Data** | `OctoMap` | `0x06` | OctoMap spatial data |
 | **Data** | `FrameData` | `0x11` | Generic frame (pixel format described by `"fmt"` metadata) |
 | **Control** | `MetadataOnly` | `0xF0` | Metadata-only (no payload) |
-| **Control** | `Subscribe` | `0xF1` | Client subscribes to a channel |
-| **Control** | `Unsubscribe` | `0xF2` | Client unsubscribes from a channel |
+| **Control** | `Subscribe` | `0xF1` | Client subscribes to channels: `{"channels": [1, 101]}`; no list (or `[]`) = every channel. Answered with `Ack`. A client is sent frames only once it has subscribed. |
+| **Control** | `Unsubscribe` | `0xF2` | Client unsubscribes from channels: `{"channels": [1]}`; no list (or `[]`) = all of them (it is then sent nothing). No reply. |
 | **Control** | `Ack` | `0xFD` | Server acknowledgement |
 | **Control** | `Error` | `0xFE` | Server error response |
 | **Control** | `Ping` | `0xFF` | Keep-alive (bidirectional) |
@@ -265,7 +265,8 @@ sequenceDiagram
     S->>Conn: OnClientConnected(socket)
     Conn->>Conn: Start recv thread
 
-    C->>Conn: Subscribe (channel=1)
+    Note over S,C: no frames until the client subscribes
+    C->>Conn: Subscribe (channels=[1])
     Conn->>S: HandleControlMessage
     S->>C: Ack
 
@@ -277,9 +278,9 @@ sequenceDiagram
     C->>Conn: Ping
     Conn->>C: Ping (echo)
 
-    C->>Conn: Unsubscribe (channel=1)
+    C->>Conn: Unsubscribe (channels=[1])
     Conn->>S: HandleControlMessage
-    S->>C: Ack
+    Note over S,C: no frames on channel 1 any more
 
     C->>Conn: TCP disconnect
     Conn->>S: OnDisconnected
@@ -358,6 +359,13 @@ Central manager for the streaming server and frame broadcasting.
 | `BroadcastRGBFrame(Channel, PixelData, W, H, Metadata)` | Push a BGRA8 RGB frame to all subscribers on a channel. |
 | `BroadcastDepthFrame(Channel, DepthData, W, H, Metadata, DepthW, DepthH)` | Push a float32 depth frame. `DepthW`/`DepthH` default to 0, meaning "same as W/H". |
 | `BroadcastRGBDFrame(Channel, PixelData, DepthData, W, H, Metadata, DepthW, DepthH)` | Push a fused RGBD frame. `W`/`H` describe the RGB half; `DepthW`/`DepthH` the depth half. |
+| `BroadcastMotionFrame(Channel, MotionData, W, H, Metadata)` | Push a `FrameMotion` frame: interleaved float32 x,y per pixel (`rg32f`), never compressed. |
+| `BroadcastFrameData(Channel, Data, W, H, Format, Metadata)` | Push a `FrameData` frame in the named pixel format (`mono8`, `float32` ...), never compressed. A known format must fill `W`×`H` exactly. |
+| `BroadcastEncodedFrame(Type, Channel, Payload&&, W, H, Metadata, StreamKey)` | C++: push a frame already in its wire format, taking the payload over; the metadata is sent as given. `StreamKey` (default: from the metadata) says which stream of the channel it is. |
+| `IsChannelWanted(Channel)` | Whether a connected client would be sent a frame on the channel: one that subscribed to it, or to every channel. A client that never subscribed does not count. Every `Broadcast*` skips a channel nobody wants. |
+| `MakeStreamKey(StreamId, Actor, Camera)` / `StreamKeyFromMetadata(Json)` | C++: the key that tells the streams of one channel apart (its frames' `stream_id`, `actor` and `camera`), so a newer frame replaces only a queued older frame of the same stream. |
+| `GetLastServerError()` | Why the last `StartServer` failed, e.g. the port is already in use by another program. |
+| `MaxOutboundQueueSize` | Messages queued per client (default 32); see `FRammsStreamConnection` below. |
 | `OnMessageReceived` | Blueprint delegate fired when an inbound message arrives. |
 | `OnNativeMessageReceived` | Native (C++) delegate with full `FRammsStreamMessage` payload. |
 | `bEnableCompression` | Global toggle — JPEG for RGB, LZ4 for depth. |
@@ -374,6 +382,47 @@ Bridges the **CameraCapture** plugin into the RMSS server for outbound streaming
 | `bStreamDepth` | `bool` | Forward depth frames. |
 | `bStreamRGBD` | `bool` | Forward fused RGBD (overrides individual RGB/Depth if true). |
 | `CameraFilter` | `FString` | Only forward frames from cameras whose ID contains this string. |
+| `bExactCameraFilter` | `bool` | `CameraFilter` is the exact name of a camera component on this actor, not a substring of any camera's id. |
+| `bStreamMotion` | `bool` | Forward motion vectors as `FrameMotion` on `ChannelID + 200` (default off). |
+| `bStreamSegmentation` | `bool` | Forward the segmentation class mask as `FrameData` `mono8` on `ChannelID + 300` (default off). |
+| `StreamName` | `FString` | With `bExactCameraFilter`, the camera's name in the stream ids and `group`; otherwise (and when empty) the camera component's name is used. |
+
+Per camera with base channel `C`, the source sends (only the enabled ones):
+
+| role | message | channel | `stream_id` | `fmt` |
+|---|---|---|---|---|
+| color | `FrameRGB` | `C` | `camera/<name>/color` | `bgra8` |
+| depth | `FrameDepth` | `C+100` | `camera/<name>/depth` | `float32` (cm) |
+| motion | `FrameMotion` | `C+200` | `motion/<name>` | `rg32f` (pixels per frame) |
+| mask | `FrameData` | `C+300` | `mask/<name>` | `mono8` (fine class per pixel) |
+
+Each of these frames keeps the metadata keys the source has always sent (`w`, `h`, `depth_w`, `depth_h`,
+`frame`, `timestamp`, `camera`, `actor`, `transform`, `intrinsics`) and adds `stream_id`, `group` (the
+stream name), `role`, `name` (`"<name> Color"` ...) and `fmt`. `actor` is the object path of the actor that
+owns the camera. `w`/`h` always describe the payload: the depth grid on a depth frame (also `unit: "cm"`), the
+motion grid on a motion frame (also `motion_w`/`motion_h`), the class-mask grid on a mask frame. Mask frames
+add `material_params` and `MaterialScalarParameters` (both `{"NumSegmentIDs": N}`, with every value in the mask
+below N: the table's highest class or reserved value + 1, or the frame's highest value + 1 if that is higher;
+the second key is the one rammp-ui's camera bridge reads), `classes` (`{"<value>": "<fine class>"}`) and
+`reserved` (the reserved stencil values, which can appear in the mask unnamed, see below) from CameraCapture's
+segmentation class table. The fused RGBD path (`bStreamRGBD`) sends exactly what it always has.
+`FRammsCameraStreams` (`RammsCameraStreams.h`) holds these conventions as plain functions.
+
+The stream ids, roles and groups match the conventions ramms-tools and rammp-ui use; the message types are
+UE's own (colour is `FrameRGB`, which `URammsStreamSinkComponent` does not turn into a texture: it takes colour
+as `ImageData`). Names are not unique across robots (two robots can each have a `front` camera), so a client
+picks a robot's camera by `actor` (and channel), never by name alone. A role is built and sent only while a
+client has subscribed to its channel (or to every channel), so an idle server -- or one whose clients only send
+into UE -- costs no copies. A source with a substring (or empty) `CameraFilter` sends several cameras on its
+channels; each camera's frames are their own stream (their `stream_id`, `actor` and `camera` make the stream
+key), so a slow client still gets the latest frame of every camera.
+
+The mask is CameraCapture's custom-depth stencil. While segmentation is on, every primitive renders custom
+depth with its class value as stencil, which overwrites stencils something else set: RammsUI's
+`URammsCameraProjectorComponent` filters its target surfaces by stencil (`TargetStencilValue`, 200) and its
+projective grid mesh writes one (`PGMCustomStencilValue`, 1). A world that uses both lists those values in
+`ReservedStencilValues` (`[/Script/CameraCapture.CameraCaptureSegmentationSettings]` in `DefaultGame.ini`):
+surfaces already rendering custom depth with a reserved value keep it and appear in the mask as that value.
 
 ### URammsStreamSinkComponent (ActorComponent)
 
@@ -423,10 +472,28 @@ Low-level TCP server managing the client connection pool.
 
 | Method | Description |
 |---|---|
-| `StartListening()` / `StopListening()` | Start or stop the accept thread. |
-| `BroadcastToSubscribers(Message)` | Send a message to all clients subscribed to the message's channel. Thread-safe. |
-| `SendTo(ConnectionId, Message)` | Send a message to a specific client. |
-| `Tick()` | Game-thread tick: flush outbound, dispatch inbound, cleanup dead connections. |
+| `StartListening()` / `StopListening()` | Start or stop the accept / send thread. `StartListening` refuses a port another program already listens on (`GetLastError()` says so); a port of 0 binds any free one (`GetPort()` then reports it). |
+| `BroadcastToSubscribers(Message, StreamKey)` | Queue a message for all clients subscribed to the message's channel (a client that never subscribed gets none). Thread-safe; never waits on a client. |
+| `SendTo(ConnectionId, Message)` | Queue a message for a specific client, subscribed or not. |
+| `HasSubscriber(Channel)` | Whether a connected client would be sent a message on the channel: it subscribed to that channel, or to every channel. |
+| `Tick()` | Game-thread tick: dispatch inbound, cleanup dead connections. |
+
+**Subscriptions.** A client is sent broadcasts (frames) only after it has sent `Subscribe`. One that never
+subscribes -- a client that only sends into UE, say -- gets nothing but the replies to its own requests (acks,
+pongs): it does not make a channel wanted, so it costs no frame building, and it is never queued frames it
+would not read. `Subscribe` with `"channels"` adds those channels; without them (or with `[]`) it means every
+channel. `Unsubscribe` with `"channels"` removes those (from "every channel" too); without them it removes
+everything, after which the client is sent nothing.
+
+**Send model.** Broadcasting only queues. The send thread copies the connection list under the lock and
+sends outside it; each client's socket is non-blocking and takes what it can, and the rest of a message is
+sent on a later pass, so a slow or stalled client delays only its own streams, never the game thread or other
+clients. A client that takes no data for 5 s while a message waits for it is dropped. A client that cannot
+keep up is sent the latest frame of every stream: a newer frame takes the place of a queued older one of the
+same stream (channel, message type and stream key -- the frames' `stream_id`, `actor` and `camera`), keeping
+that stream's turn in the queue, so no stream is starved by the ones queued after it each tick, and several
+cameras sent on one channel each keep their latest frame. At `MaxOutboundQueueSize` the oldest queued frame
+makes room (control messages are kept).
 
 **Statistics** (atomic counters):
 
@@ -434,8 +501,8 @@ Low-level TCP server managing the client connection pool.
 |---|---|
 | `TotalBytesSent` | Cumulative bytes sent to all clients. |
 | `TotalBytesReceived` | Cumulative bytes received from all clients. |
-| `FramesSent` | Total frames broadcast. |
-| `FramesDropped` | Frames dropped due to full outbound queues. |
+| `FramesSent` | Total messages sent. |
+| `FramesDropped` | Frames dropped from outbound queues: replaced by a newer frame of their stream, or pushed out by a full queue. |
 | `TotalConnectionsAccepted` | Lifetime count of accepted connections. |
 
 ### FRammsStreamConnection (FRunnable)
@@ -444,12 +511,14 @@ Per-client TCP handler running on its own receive thread.
 
 | Property / Method | Description |
 |---|---|
-| `SubscribedChannels` (`TSet<uint16>`) | Channels this client wants to receive. |
+| `SubscribedChannels` (`TSet<uint16>`) | Channels this client subscribed to by number (empty and not `bSubscribedToAll`: it is sent nothing). |
+| `bSubscribedToAll` / `UnsubscribedChannels` | Subscribed to every channel (a `Subscribe` without channels), but those taken out since. |
+| `WantsChannel(Channel)` | Whether this client is sent broadcasts on the channel. |
 | `PreferredCompression` | Compression requested by the client (`None`, `LZ4`, `JPEG`, `PNG`). |
-| `EnqueueOutbound(Message, bDropOldest)` | Queue a message for sending. Drops oldest if queue is full (default: 3 messages max). |
-| `FlushOutbound()` | Flush queued messages to the TCP socket (called by server thread). |
+| `EnqueueOutbound(Message, bDropOldest, OutDropped, StreamKey)` | Queue a message for sending: a frame takes the place of a queued frame of the same stream (channel, type, stream key), the oldest frame makes room when full. |
+| `FlushOutbound(OutBytesSent)` | Send what the socket takes now, without waiting (called by the send thread). |
 | `DequeueInbound(OutMessage)` | Retrieve the next received message (thread-safe). |
-| `MaxOutboundQueueSize` | Per-connection back-pressure limit (default: 3). |
+| `MaxOutboundQueueSize` | Messages queued per connection (default: 32). |
 
 ---
 
