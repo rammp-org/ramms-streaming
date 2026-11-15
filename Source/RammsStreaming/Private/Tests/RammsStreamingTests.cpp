@@ -275,6 +275,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsStreamingSubscriptions, "Ramms.Streaming.
 bool FRammsStreamingSubscriptions::RunTest(const FString& Parameters)
 {
 	using namespace RammsStreamingTests;
+	// The viewer stops reading at the end; should the machine be slow enough for that to count as a stall, say so.
+	AddExpectedMessagePlain(TEXT("RMSS: Dropping connection"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
 
 	FRammsStreamServer Server(0, 4);
 	if (!TestTrue(TEXT("server listens on a free port"), Server.StartListening()))
