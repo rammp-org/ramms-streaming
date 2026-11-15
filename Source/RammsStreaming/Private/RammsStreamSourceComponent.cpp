@@ -1,8 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsStreamSourceComponent.h"
+#include "CameraCaptureSegmentation.h"
 #include "CameraCaptureSubsystem.h"
 #include "Dom/JsonObject.h"
+#include "Engine/GameInstance.h"
+#include "Engine/World.h"
+#include "GameFramework/Actor.h"
+#include "RammsCameraStreams.h"
 #include "RammsStreamProtocol.h"
 #include "RammsStreamingSubsystem.h"
 #include "Serialization/JsonSerializer.h"
@@ -61,11 +66,74 @@ void URammsStreamSourceComponent::EndPlay(
 	Super::EndPlay(EndPlayReason);
 }
 
+bool URammsStreamSourceComponent::CameraMatchesFilter(const FString& Filter,
+	bool bExact, const FCameraIdentifier& Camera,
+	const FString& CameraActorPath, const FString& OwnerActorPath)
+{
+	if (Filter.IsEmpty())
+	{
+		return true;
+	}
+	if (bExact)
+	{
+		// The camera component of exactly that name, on this actor: a substring
+		// of "Actor::Component" would also take "front_wide" for "front", or
+		// another actor's "front".
+		return Camera.ComponentName.Equals(Filter, ESearchCase::IgnoreCase)
+			&& !OwnerActorPath.IsEmpty() && CameraActorPath == OwnerActorPath;
+	}
+	return Camera.ToString().Contains(Filter);
+}
+
+bool URammsStreamSourceComponent::AcceptsCamera(
+	const FCameraIdentifier& Camera, const FString& CameraActorPath) const
+{
+	const AActor* Owner = GetOwner();
+	return CameraMatchesFilter(CameraFilter, bExactCameraFilter, Camera,
+		CameraActorPath, Owner ? Owner->GetPathName() : FString());
+}
+
+FString URammsStreamSourceComponent::GetStreamNameFor(
+	const FCameraIdentifier& Camera) const
+{
+	if (!StreamName.IsEmpty())
+	{
+		return StreamName;
+	}
+	return Camera.ComponentName.IsEmpty() ? Camera.ToString() : Camera.ComponentName;
+}
+
+TArray<FRammsCameraStreamDesc> URammsStreamSourceComponent::DescribeStreams(
+	const FString& CameraStreamName) const
+{
+	TArray<FRammsCameraStreamDesc> Streams;
+	if (!bStreamRGBD)
+	{
+		if (bStreamRGB)
+		{
+			Streams.Add(FRammsCameraStreams::Describe(CameraStreamName, ERammsCameraStreamRole::Color, ChannelID));
+		}
+		if (bStreamDepth)
+		{
+			Streams.Add(FRammsCameraStreams::Describe(CameraStreamName, ERammsCameraStreamRole::Depth, ChannelID));
+		}
+	}
+	if (bStreamMotion)
+	{
+		Streams.Add(FRammsCameraStreams::Describe(CameraStreamName, ERammsCameraStreamRole::Motion, ChannelID));
+	}
+	if (bStreamSegmentation)
+	{
+		Streams.Add(FRammsCameraStreams::Describe(CameraStreamName, ERammsCameraStreamRole::Mask, ChannelID));
+	}
+	return Streams;
+}
+
 void URammsStreamSourceComponent::OnFrameCaptured(
 	TSharedRef<const FCaptureData> Data)
 {
 	// Filter by camera ID if configured
-	if (!CameraFilter.IsEmpty() && !Data->CameraID.ToString().Contains(CameraFilter))
+	if (!AcceptsCamera(Data->CameraID, Data->ActorPath))
 	{
 		return;
 	}
@@ -79,8 +147,7 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 	if (!StreamSub || !StreamSub->IsServerRunning())
 		return;
 
-	// Build metadata JSON
-	FString MetaJson = BuildMetadataJson(*Data);
+	const FString CameraStreamName = GetStreamNameFor(Data->CameraID);
 
 	// Depth may be on its own grid; carry those dimensions rather than letting a
 	// client assume the colour ones. Zero means "no depth captured".
@@ -89,7 +156,16 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 
 	if (bStreamRGBD && Data->ImageData.Num() > 0 && Data->DepthData.Num() > 0)
 	{
-		// Combined RGBD
+		// Combined RGBD, with the metadata it has always had: one message is two
+		// roles, so it carries no single stream id.
+		FString RgbdMeta;
+		{
+			const TSharedRef<FJsonObject>										   Base = FRammsCameraStreams::BuildBaseMetadata(*Data);
+			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+				TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&RgbdMeta);
+			FJsonSerializer::Serialize(Base, Writer);
+		}
+
 		TArray<uint8> RgbBytes;
 		RgbBytes.SetNumUninitialized(Data->ImageData.Num() * sizeof(FColor));
 		FMemory::Memcpy(RgbBytes.GetData(), Data->ImageData.GetData(),
@@ -97,7 +173,7 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 
 		TArray<float> DepthCopy = Data->DepthData;
 		StreamSub->BroadcastRGBDFrame(ChannelID, RgbBytes, DepthCopy, Data->Width,
-			Data->Height, MetaJson, DepthW, DepthH);
+			Data->Height, RgbdMeta, DepthW, DepthH);
 	}
 	else
 	{
@@ -108,63 +184,54 @@ void URammsStreamSourceComponent::OnFrameCaptured(
 			FMemory::Memcpy(RgbBytes.GetData(), Data->ImageData.GetData(),
 				RgbBytes.Num());
 			StreamSub->BroadcastRGBFrame(ChannelID, RgbBytes, Data->Width,
-				Data->Height, MetaJson);
+				Data->Height,
+				FRammsCameraStreams::BuildFrameMetadataJson(*Data, CameraStreamName, ERammsCameraStreamRole::Color));
 		}
 
 		if (bStreamDepth && Data->DepthData.Num() > 0)
 		{
 			// Use ChannelID + 100 for depth so clients can subscribe independently
 			TArray<float> DepthCopy = Data->DepthData;
-			StreamSub->BroadcastDepthFrame(ChannelID + 100, DepthCopy, DepthW,
-				DepthH, MetaJson, DepthW, DepthH);
+			StreamSub->BroadcastDepthFrame(ChannelID + FRammsCameraStreams::DepthChannelOffset, DepthCopy, DepthW,
+				DepthH,
+				FRammsCameraStreams::BuildFrameMetadataJson(*Data, CameraStreamName, ERammsCameraStreamRole::Depth),
+				DepthW, DepthH);
 		}
 	}
-}
 
-FString
-URammsStreamSourceComponent::BuildMetadataJson(const FCaptureData& Data) const
-{
-	TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
-
-	Json->SetNumberField(TEXT("w"), Data.Width);
-	Json->SetNumberField(TEXT("h"), Data.Height);
-	if (Data.DepthWidth > 0 && Data.DepthHeight > 0)
+	// Motion: its own pass and its own grid. FVector2D is double; the wire is
+	// float32 x,y.
+	const int32 MotionPixels = Data->MotionWidth * Data->MotionHeight;
+	if (bStreamMotion && MotionPixels > 0 && Data->MotionVectorData.Num() == MotionPixels)
 	{
-		Json->SetNumberField(TEXT("depth_w"), Data.DepthWidth);
-		Json->SetNumberField(TEXT("depth_h"), Data.DepthHeight);
+		TArray<float> MotionFloats;
+		MotionFloats.SetNumUninitialized(MotionPixels * 2);
+		for (int32 Pixel = 0; Pixel < MotionPixels; ++Pixel)
+		{
+			const FVector2D& Velocity = Data->MotionVectorData[Pixel];
+			MotionFloats[Pixel * 2] = static_cast<float>(Velocity.X);
+			MotionFloats[Pixel * 2 + 1] = static_cast<float>(Velocity.Y);
+		}
+		StreamSub->BroadcastMotionFrame(ChannelID + FRammsCameraStreams::MotionChannelOffset, MotionFloats,
+			Data->MotionWidth, Data->MotionHeight,
+			FRammsCameraStreams::BuildFrameMetadataJson(*Data, CameraStreamName, ERammsCameraStreamRole::Motion));
 	}
-	Json->SetNumberField(TEXT("frame"), Data.FrameNumber);
-	Json->SetNumberField(TEXT("timestamp"), Data.Timestamp);
-	Json->SetStringField(TEXT("camera"), Data.CameraID.ToString());
-	Json->SetStringField(TEXT("actor"), Data.ActorPath);
 
-	// Transform
-	const FVector			Loc = Data.WorldTransform.GetLocation();
-	const FRotator			Rot = Data.WorldTransform.Rotator();
-	TSharedRef<FJsonObject> TransformJson = MakeShared<FJsonObject>();
-	TransformJson->SetNumberField(TEXT("x"), Loc.X);
-	TransformJson->SetNumberField(TEXT("y"), Loc.Y);
-	TransformJson->SetNumberField(TEXT("z"), Loc.Z);
-	TransformJson->SetNumberField(TEXT("pitch"), Rot.Pitch);
-	TransformJson->SetNumberField(TEXT("yaw"), Rot.Yaw);
-	TransformJson->SetNumberField(TEXT("roll"), Rot.Roll);
-	Json->SetObjectField(TEXT("transform"), TransformJson);
-
-	// Intrinsics
-	TSharedRef<FJsonObject> IntrinsicsJson = MakeShared<FJsonObject>();
-	IntrinsicsJson->SetNumberField(TEXT("fx"), Data.Intrinsics.FocalLengthX);
-	IntrinsicsJson->SetNumberField(TEXT("fy"), Data.Intrinsics.FocalLengthY);
-	IntrinsicsJson->SetNumberField(TEXT("cx"), Data.Intrinsics.PrincipalPointX);
-	IntrinsicsJson->SetNumberField(TEXT("cy"), Data.Intrinsics.PrincipalPointY);
-	IntrinsicsJson->SetNumberField(TEXT("res_x"), Data.Intrinsics.ImageWidth);
-	IntrinsicsJson->SetNumberField(TEXT("res_y"), Data.Intrinsics.ImageHeight);
-	Json->SetObjectField(TEXT("intrinsics"), IntrinsicsJson);
-
-	// Serialize to string
-	FString															 OutputString;
-	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
-		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(
-			&OutputString);
-	FJsonSerializer::Serialize(Json, Writer);
-	return OutputString;
+	// Mask: one fine class per pixel on the colour grid, with the class table so
+	// a client can name the values.
+	const int32 ClassPixels = Data->ClassWidth * Data->ClassHeight;
+	if (bStreamSegmentation && ClassPixels > 0 && Data->ClassData.Num() == ClassPixels)
+	{
+		const UCameraCaptureSegmentationSubsystem* Labels =
+			GetWorld() ? GetWorld()->GetSubsystem<UCameraCaptureSegmentationSubsystem>() : nullptr;
+		TSharedPtr<const FCameraCaptureSegTable> SegTable;
+		if (Labels)
+		{
+			SegTable = Labels->GetTable();
+		}
+		StreamSub->BroadcastFrameData(ChannelID + FRammsCameraStreams::MaskChannelOffset, Data->ClassData,
+			Data->ClassWidth, Data->ClassHeight, FRammsCameraStreams::Format(ERammsCameraStreamRole::Mask),
+			FRammsCameraStreams::BuildFrameMetadataJson(*Data, CameraStreamName, ERammsCameraStreamRole::Mask,
+				SegTable.Get()));
+	}
 }

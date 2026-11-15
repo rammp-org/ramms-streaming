@@ -358,6 +358,8 @@ Central manager for the streaming server and frame broadcasting.
 | `BroadcastRGBFrame(Channel, PixelData, W, H, Metadata)` | Push a BGRA8 RGB frame to all subscribers on a channel. |
 | `BroadcastDepthFrame(Channel, DepthData, W, H, Metadata, DepthW, DepthH)` | Push a float32 depth frame. `DepthW`/`DepthH` default to 0, meaning "same as W/H". |
 | `BroadcastRGBDFrame(Channel, PixelData, DepthData, W, H, Metadata, DepthW, DepthH)` | Push a fused RGBD frame. `W`/`H` describe the RGB half; `DepthW`/`DepthH` the depth half. |
+| `BroadcastMotionFrame(Channel, MotionData, W, H, Metadata)` | Push a `FrameMotion` frame: interleaved float32 x,y per pixel (`rg32f`), never compressed. |
+| `BroadcastFrameData(Channel, Data, W, H, Format, Metadata)` | Push a `FrameData` frame in the named pixel format (`mono8`, `float32` ...), never compressed. |
 | `OnMessageReceived` | Blueprint delegate fired when an inbound message arrives. |
 | `OnNativeMessageReceived` | Native (C++) delegate with full `FRammsStreamMessage` payload. |
 | `bEnableCompression` | Global toggle — JPEG for RGB, LZ4 for depth. |
@@ -374,6 +376,28 @@ Bridges the **CameraCapture** plugin into the RMSS server for outbound streaming
 | `bStreamDepth` | `bool` | Forward depth frames. |
 | `bStreamRGBD` | `bool` | Forward fused RGBD (overrides individual RGB/Depth if true). |
 | `CameraFilter` | `FString` | Only forward frames from cameras whose ID contains this string. |
+| `bExactCameraFilter` | `bool` | `CameraFilter` is the exact name of a camera component on this actor, not a substring of any camera's id. |
+| `bStreamMotion` | `bool` | Forward motion vectors as `FrameMotion` on `ChannelID + 200` (default off). |
+| `bStreamSegmentation` | `bool` | Forward the segmentation class mask as `FrameData` `mono8` on `ChannelID + 300` (default off). |
+| `StreamName` | `FString` | The camera's name in the stream ids and `group`; empty = the camera component's name. |
+
+Per camera with base channel `C`, the source sends (only the enabled ones):
+
+| role | message | channel | `stream_id` | `fmt` |
+|---|---|---|---|---|
+| color | `FrameRGB` | `C` | `camera/<name>/color` | `bgra8` |
+| depth | `FrameDepth` | `C+100` | `camera/<name>/depth` | `float32` (cm) |
+| motion | `FrameMotion` | `C+200` | `motion/<name>` | `rg32f` (pixels per frame) |
+| mask | `FrameData` | `C+300` | `mask/<name>` | `mono8` (fine class per pixel) |
+
+Each of these frames keeps the metadata keys the source has always sent (`w`, `h`, `depth_w`, `depth_h`,
+`frame`, `timestamp`, `camera`, `actor`, `transform`, `intrinsics`) and adds `stream_id`, `group` (the
+stream name), `role`, `name` (`"<name> Color"` ...) and `fmt`. `w`/`h` always describe the payload: the
+motion grid on a motion frame (also `motion_w`/`motion_h`), the class-mask grid on a mask frame. Mask frames
+add `material_params` and `MaterialScalarParameters` (both `{"NumSegmentIDs": highest class value + 1}`; the
+second is the key rammp-ui's camera bridge reads) and `classes` (`{"<value>": "<fine class>"}`) from
+CameraCapture's segmentation class table. The fused RGBD path (`bStreamRGBD`) sends exactly what it always
+has. `FRammsCameraStreams` (`RammsCameraStreams.h`) holds these conventions as plain functions.
 
 ### URammsStreamSinkComponent (ActorComponent)
 
