@@ -90,21 +90,21 @@ uint32 FRammsStreamConnection::Run()
 			continue;
 		}
 
+		// FSocket::Recv on a stream socket returns false both for an error and for the peer closing (zero bytes),
+		// and true with zero bytes when a non-blocking socket had nothing after all. Accepted sockets are
+		// non-blocking (see FRammsStreamServer::OnClientConnected), so the latter is not a close.
 		int32 BytesRead = 0;
 		if (!Socket->Recv(ChunkBuffer.GetData(), RECV_CHUNK_SIZE, BytesRead))
 		{
-			UE_LOG(LogTemp, Warning,
-				TEXT("RMSS: Recv error on connection %u (buffer=%d bytes), "
-					 "disconnecting"),
+			UE_LOG(LogTemp, Log,
+				TEXT("RMSS: Connection %u closed by the peer or failed (buffer=%d bytes)"),
 				ConnectionId, RecvBuffer.Num());
 			break;
 		}
 
 		if (BytesRead == 0)
 		{
-			UE_LOG(LogTemp, Log, TEXT("RMSS: Connection %u closed gracefully"),
-				ConnectionId);
-			break;
+			continue;
 		}
 
 		// Append to receive buffer
@@ -196,46 +196,181 @@ void FRammsStreamConnection::Stop()
 // Outbound queue
 // ---------------------------------------------------------------------------
 
-bool FRammsStreamConnection::EnqueueOutbound(
-	const TSharedRef<FRammsStreamMessage>& Message, bool bDropOldest)
+namespace RammsStreamConnectionImpl
 {
-	FScopeLock Lock(&OutboundLock);
-	if (OutboundQueue.Num() >= MaxOutboundQueueSize)
+	/** Frames may be superseded or dropped under back-pressure; control messages may not. */
+	bool IsDroppableFrame(const FRammsStreamMessage& Message)
 	{
-		if (bDropOldest)
+		return GetFrameCategory(Message.Header.MessageType) != ERammsFrameCategory::Control;
+	}
+} // namespace RammsStreamConnectionImpl
+
+bool FRammsStreamConnection::EnqueueOutbound(
+	const TSharedRef<FRammsStreamMessage>& Message, bool bDropOldest, int32* OutDropped)
+{
+	using RammsStreamConnectionImpl::IsDroppableFrame;
+
+	int32 Dropped = 0;
+	bool  bQueued = true;
+	{
+		FScopeLock Lock(&OutboundLock);
+		if (bDropOldest && IsDroppableFrame(*Message))
 		{
-			OutboundQueue.RemoveAt(0);
+			// A newer frame of the same stream replaces one still waiting, so a slow client is sent the latest
+			// of each stream instead of working through a backlog. The four streams of a camera (and several
+			// cameras) are different channels, so they no longer push each other out.
+			const uint16				  Channel = Message->Header.ChannelID;
+			const ERammsStreamMessageType Type = Message->Header.MessageType;
+			Dropped += OutboundQueue.RemoveAll([Channel, Type](const TSharedRef<FRammsStreamMessage>& Queued) {
+				return Queued->Header.ChannelID == Channel && Queued->Header.MessageType == Type;
+			});
 		}
-		else
+		if (OutboundQueue.Num() >= FMath::Max(1, MaxOutboundQueueSize))
 		{
-			return false;
+			// Make room with the oldest frame; acks and pongs stay. With only control messages queued, a frame is
+			// refused rather than one of them dropped (and a control message replaces the oldest one, so a client
+			// that only pings cannot grow the queue).
+			const int32 OldestFrame = bDropOldest
+				? OutboundQueue.IndexOfByPredicate([](const TSharedRef<FRammsStreamMessage>& Queued) {
+					  return IsDroppableFrame(*Queued);
+				  })
+				: INDEX_NONE;
+			if (OldestFrame != INDEX_NONE)
+			{
+				OutboundQueue.RemoveAt(OldestFrame);
+			}
+			else if (bDropOldest && !IsDroppableFrame(*Message))
+			{
+				OutboundQueue.RemoveAt(0);
+			}
+			else
+			{
+				bQueued = false;
+			}
+			++Dropped;
+		}
+		if (bQueued)
+		{
+			OutboundQueue.Add(Message);
 		}
 	}
-	OutboundQueue.Add(Message);
-	return true;
+	if (OutDropped)
+	{
+		*OutDropped = Dropped;
+	}
+	return bQueued;
+}
+
+bool FRammsStreamConnection::HasPendingOutbound() const
+{
+	if (InFlight.IsValid())
+	{
+		return true;
+	}
+	FScopeLock Lock(&OutboundLock);
+	return OutboundQueue.Num() > 0;
+}
+
+void FRammsStreamConnection::GetQueuedOutbound(TArray<TSharedRef<FRammsStreamMessage>>& OutMessages) const
+{
+	FScopeLock Lock(&OutboundLock);
+	OutMessages = OutboundQueue;
+}
+
+void FRammsStreamConnection::FailSend(const TCHAR* Why)
+{
+	UE_LOG(LogTemp, Warning, TEXT("RMSS: Dropping connection %u: %s"), ConnectionId, Why);
+	InFlight.Reset();
+	bConnected = false;
 }
 
 int32 FRammsStreamConnection::FlushOutbound()
 {
-	TArray<TSharedRef<FRammsStreamMessage>> ToSend;
+	// Never waits. The listen socket is non-blocking, an accepted socket is made non-blocking too, and a frame
+	// larger than the socket's send buffer (a 640x480 colour frame is 1.2 MB) fills it: that is back-pressure, not
+	// a dead client. What the socket does not take now is sent on a later call, from where it stopped, while the
+	// send thread serves the other clients in between.
+	int32 Completed = 0;
+	while (!bStopping && bConnected)
 	{
-		FScopeLock Lock(&OutboundLock);
-		Swap(ToSend, OutboundQueue);
-	}
-
-	int32 Sent = 0;
-	for (const auto& Msg : ToSend)
-	{
-		TArray<uint8> Bytes = Msg->Serialize();
-		if (!SendAll(Bytes.GetData(), Bytes.Num()))
+		if (!InFlight.IsValid())
 		{
-			// Send failed — connection likely dead
-			bConnected = false;
-			break;
+			{
+				FScopeLock Lock(&OutboundLock);
+				if (OutboundQueue.Num() == 0)
+				{
+					return Completed;
+				}
+				InFlight = OutboundQueue[0];
+				OutboundQueue.RemoveAt(0, EAllowShrinking::No);
+			}
+			FRammsStreamHeader Header = InFlight->Header;
+			Header.MetadataLen = static_cast<uint32>(InFlight->Metadata.Num());
+			Header.PayloadLen = static_cast<uint32>(InFlight->Payload.Num());
+			Header.ToBytes(InFlightHeader);
+			InFlightOffset = 0;
+			LastSendProgressSeconds = FPlatformTime::Seconds();
 		}
-		++Sent;
+
+		const int64 HeaderBytes = FRammsStreamHeader::HEADER_SIZE;
+		const int64 MetadataBytes = InFlight->Metadata.Num();
+		const int64 TotalBytes = HeaderBytes + MetadataBytes + InFlight->Payload.Num();
+		while (InFlightOffset < TotalBytes)
+		{
+			const uint8* Data = nullptr;
+			int64		 Remaining = 0;
+			if (InFlightOffset < HeaderBytes)
+			{
+				Data = InFlightHeader + InFlightOffset;
+				Remaining = HeaderBytes - InFlightOffset;
+			}
+			else if (InFlightOffset < HeaderBytes + MetadataBytes)
+			{
+				Data = InFlight->Metadata.GetData() + (InFlightOffset - HeaderBytes);
+				Remaining = HeaderBytes + MetadataBytes - InFlightOffset;
+			}
+			else
+			{
+				Data = InFlight->Payload.GetData() + (InFlightOffset - HeaderBytes - MetadataBytes);
+				Remaining = TotalBytes - InFlightOffset;
+			}
+
+			int32 BytesSent = 0;
+			if (Socket->Send(Data, static_cast<int32>(Remaining), BytesSent) && BytesSent > 0)
+			{
+				InFlightOffset += BytesSent;
+				LastSendProgressSeconds = FPlatformTime::Seconds();
+				continue;
+			}
+
+			const ESocketErrors Error = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->GetLastErrorCode();
+			if (bStopping)
+			{
+				// Being closed (RequestStop shut the socket down): not a failure worth reporting.
+				InFlight.Reset();
+				return Completed;
+			}
+			if (Error != SE_EWOULDBLOCK && Error != SE_NO_ERROR)
+			{
+				FailSend(*FString::Printf(TEXT("send error %d after %lld of %lld bytes of a message"),
+					static_cast<int32>(Error), InFlightOffset, TotalBytes));
+				return Completed;
+			}
+			const double Stalled = FPlatformTime::Seconds() - LastSendProgressSeconds;
+			if (Stalled > SendStallTimeoutSeconds)
+			{
+				FailSend(*FString::Printf(TEXT("it took no data for %.1f s (%lld of %lld bytes of a message sent)"),
+					Stalled, InFlightOffset, TotalBytes));
+				return Completed;
+			}
+			// The socket is full: carry on from here on a later pass.
+			return Completed;
+		}
+
+		InFlight.Reset();
+		++Completed;
 	}
-	return Sent;
+	return Completed;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,48 +470,4 @@ void FRammsStreamConnection::EnsureInboundRingCapacity(int32 Cap)
 	InboundRing = MoveTemp(Tmp);
 	InboundHead = 0;
 	InboundCount = Keep;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-bool FRammsStreamConnection::SendAll(const uint8* Data, int32 Len)
-{
-	// The listen socket is non-blocking and an accepted socket inherits that on Windows, so a frame larger than the
-	// socket's send buffer (a 640x480 colour frame is 1.2 MB) fills it and Send fails with EWOULDBLOCK. That is
-	// back-pressure, not a dead peer: wait until the socket can take more and carry on, up to a deadline.
-	constexpr double SendStallTimeoutSeconds = 5.0;
-	double			 StallStart = -1.0;
-	int32			 TotalSent = 0;
-	while (TotalSent < Len)
-	{
-		int32 BytesSent = 0;
-		if (Socket->Send(Data + TotalSent, Len - TotalSent, BytesSent) && BytesSent > 0)
-		{
-			TotalSent += BytesSent;
-			StallStart = -1.0;
-			continue;
-		}
-		const ESocketErrors Error = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->GetLastErrorCode();
-		if (Error != SE_EWOULDBLOCK && Error != SE_NO_ERROR)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("RMSS: Send error %d on connection %u after %d of %d bytes"),
-				static_cast<int32>(Error), ConnectionId, TotalSent, Len);
-			return false;
-		}
-		const double Now = FPlatformTime::Seconds();
-		if (StallStart < 0.0)
-		{
-			StallStart = Now;
-		}
-		if (bStopping || Now - StallStart > SendStallTimeoutSeconds)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("RMSS: Connection %u stalled for %.1f s with %d of %d bytes sent; dropping it"),
-				ConnectionId, Now - StallStart, TotalSent, Len);
-			return false;
-		}
-		Socket->Wait(ESocketWaitConditions::WaitForWrite, FTimespan::FromMilliseconds(20));
-	}
-	return true;
 }

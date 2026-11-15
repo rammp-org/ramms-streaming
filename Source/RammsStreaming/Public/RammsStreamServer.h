@@ -6,6 +6,7 @@
 #include "HAL/Runnable.h"
 #include "RammsStreamProtocol.h"
 
+class FEvent;
 class FSocket;
 class FTcpListener;
 class FRammsStreamConnection;
@@ -22,12 +23,16 @@ DECLARE_DELEGATE_TwoParams(FOnStreamMessageReceived, uint32 /*ConnectionId*/,
  *
  * Typical flow:
  *   1. Construct with port number.
- *   2. Call StartListening() — spawns accept thread.
- *   3. Call Tick() every frame (or timer) to process inbound messages and flush
- * outbound.
+ *   2. Call StartListening() — spawns the accept / send thread.
+ *   3. Call Tick() every frame (or timer) to process inbound messages and drop
+ * dead connections.
  *   4. Call BroadcastToSubscribers() to push camera frames to interested
  * clients.
  *   5. Call StopListening() on shutdown.
+ *
+ * Sending never blocks the caller or holds the connection lock: broadcasting
+ * only queues, and the send thread writes to each client what its socket takes
+ * without waiting, so a slow or stalled client delays only its own streams.
  */
 class RAMMSSTREAMING_API FRammsStreamServer : public FRunnable
 {
@@ -36,18 +41,31 @@ public:
 	virtual ~FRammsStreamServer();
 
 	// ── Lifecycle ────────────────────────────────────────────────────
+	/**
+	 * Bind the port and start the accept / send thread. Refuses a port another program already listens on
+	 * (no second listener sharing it). False on failure, with the reason in GetLastError().
+	 */
 	bool StartListening();
 	void StopListening();
 	bool IsListening() const { return bListening; }
 
+	/** Why the last StartListening failed ("" after a success). */
+	const FString& GetLastError() const { return LastError; }
+
 	// ── Configuration ────────────────────────────────────────────────
+	/** The port: as configured, and once listening the one actually bound (a configured 0 binds any free one). */
 	uint16 GetPort() const { return Port; }
 	int32  GetMaxClients() const { return MaxClients; }
 	int32  GetConnectionCount() const;
 
-	/** Queue size limits applied to new connections. */
+	/** True when a connected client would be sent a message on Channel: it subscribed to it, or to nothing (which
+	 *  means everything). Thread-safe. */
+	bool HasSubscriber(uint16 Channel) const;
+
+	/** Queue size limits applied to new connections. Outbound: a client is sent the latest frame of each stream
+	 *  (see FRammsStreamConnection::EnqueueOutbound), so this bounds the number of streams queued at once. */
 	int32 DefaultMaxInboundQueueSize = 64;
-	int32 DefaultMaxOutboundQueueSize = 3;
+	int32 DefaultMaxOutboundQueueSize = 32;
 
 	// ── Frame / message distribution ─────────────────────────────────
 	/**
@@ -61,7 +79,7 @@ public:
 		const TSharedRef<FRammsStreamMessage>& Message);
 
 	/**
-	 * Process one tick: flush outbound queues, collect and dispatch inbound
+	 * Process one tick: drop dead connections, collect and dispatch inbound
 	 * messages. Should be called from the game thread (e.g., via subsystem Tick).
 	 */
 	void Tick();
@@ -95,8 +113,14 @@ private:
 	FSocket*		 ListenSocket = nullptr;
 	FRunnableThread* ServerThread = nullptr;
 
-	// Active connections — guarded by ConnectionsLock
-	FCriticalSection								 ConnectionsLock;
+	/** Wakes the send thread when something is queued (or the server stops). */
+	FEvent* SendEvent = nullptr;
+
+	FString LastError;
+
+	// Active connections — guarded by ConnectionsLock, which is only ever held briefly: the send thread copies the
+	// list under it and sends outside it.
+	mutable FCriticalSection						 ConnectionsLock;
 	TMap<uint32, TSharedPtr<FRammsStreamConnection>> Connections;
 	TAtomic<uint32>									 NextConnectionId{ 1 };
 

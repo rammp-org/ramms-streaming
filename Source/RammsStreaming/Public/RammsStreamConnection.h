@@ -42,20 +42,40 @@ public:
 	// ── Outbound (server → client) ───────────────────────────────────
 	/**
 	 * Enqueue a message for sending.  Thread-safe.
+	 *
+	 * With bDropOldest a client that cannot keep up gets the latest of each stream rather than a backlog: a frame
+	 * (any non-control message) replaces a queued, not yet started frame of the same channel and message type, and
+	 * when the queue is full the oldest queued frame makes room. Control messages (acks, pongs) are never dropped to
+	 * make room for a frame: with only those queued, the frame is refused. A sender that numbers its messages (an
+	 * IMU sample feed) lets a client see what was dropped.
 	 * @param Message  The message to send.
-	 * @param bDropOldest  If true and the queue is full, drop the oldest message.
-	 * @return true if enqueued (or replaced oldest), false if dropped (queue full
-	 * and !bDropOldest).
+	 * @param bDropOldest  If true, supersede and drop as above; if false, a full queue refuses the message.
+	 * @param OutDropped  If given, the number of queued messages this call dropped (plus 1 when it refused Message).
+	 * @return true if enqueued, false if refused (queue full and nothing it may drop).
 	 */
 	bool EnqueueOutbound(const TSharedRef<FRammsStreamMessage>& Message,
-		bool													bDropOldest = true);
+		bool bDropOldest = true, int32* OutDropped = nullptr);
 
-	/** Flush as many outbound messages as possible to the socket. Call from the
-	 * send thread. */
+	/**
+	 * Send as much as the socket takes right now, without waiting: the message in flight first, then queued ones
+	 * oldest first. A message the socket will not take whole stays in flight and continues on the next call, so a
+	 * slow client holds up only its own stream. A client that has taken no byte for SendStallTimeoutSeconds is
+	 * marked disconnected. Call from the send thread only.
+	 * @return the number of messages completed by this call.
+	 */
 	int32 FlushOutbound();
 
-	/** Maximum number of outbound messages to buffer before dropping. */
-	int32 MaxOutboundQueueSize = 3;
+	/** True while a message is part-sent or waiting in the queue. Call from the send thread. */
+	bool HasPendingOutbound() const;
+
+	/** The queued (not yet started) outbound messages, oldest first. Thread-safe; for diagnostics and tests. */
+	void GetQueuedOutbound(TArray<TSharedRef<FRammsStreamMessage>>& OutMessages) const;
+
+	/** Maximum number of outbound messages queued per connection (see EnqueueOutbound). */
+	int32 MaxOutboundQueueSize = 32;
+
+	/** Seconds a client may go without accepting a byte while a message waits for it before it is dropped. */
+	static constexpr double SendStallTimeoutSeconds = 5.0;
 
 	// ── Inbound (client → server) ────────────────────────────────────
 	/** Dequeue one inbound message. Returns false if empty. Thread-safe. */
@@ -91,8 +111,16 @@ private:
 	static constexpr int32 RECV_BUFFER_SHRINK_THRESHOLD = 4 * RECV_CHUNK_SIZE; // 256 KB
 
 	// Thread-safe queues
-	FCriticalSection						OutboundLock;
+	mutable FCriticalSection				OutboundLock;
 	TArray<TSharedRef<FRammsStreamMessage>> OutboundQueue;
+
+	// The message being sent (send thread only): it is never dropped once started, since half a message would
+	// desynchronise the stream. Sent straight from the shared message (header bytes, then metadata, then payload),
+	// so a frame broadcast to several clients is not copied per client.
+	TSharedPtr<FRammsStreamMessage> InFlight;
+	uint8							InFlightHeader[FRammsStreamHeader::HEADER_SIZE] = {};
+	int64							InFlightOffset = 0;
+	double							LastSendProgressSeconds = 0.0;
 
 	// Inbound ring buffer — O(1) enqueue, dequeue and drop-oldest.
 	// When MaxInboundQueueSize > 0 the ring is pre-allocated to that
@@ -106,6 +134,6 @@ private:
 	/** Ensure the ring backing store has room for at least Cap elements. */
 	void EnsureInboundRingCapacity(int32 Cap);
 
-	/** Send raw bytes, handling partial sends. Returns false on error. */
-	bool SendAll(const uint8* Data, int32 Len);
+	/** Mark the connection dead after a send failure or stall. */
+	void FailSend(const TCHAR* Why);
 };
