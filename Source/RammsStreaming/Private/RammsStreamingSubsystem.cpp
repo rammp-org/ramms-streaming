@@ -78,8 +78,21 @@ bool URammsStreamingSubsystem::StartServer(int32 Port, int32 MaxClients)
 		MakeUnique<FRammsStreamServer>(static_cast<uint16>(Port), MaxClients);
 
 	// Apply queue size configuration
-	const int32 SanitizedMaxInboundQueueSize =
-		(MaxInboundQueueSize > 0) ? MaxInboundQueueSize : 1;
+	// 0 means unlimited, as MaxInboundQueueSize documents. Sanitising it to 1
+	// gave every connection a one-message inbound ring, and the ring drops the
+	// oldest when full: with several channels arriving between two game-thread
+	// ticks, only the last one sent survived and the rest were discarded before
+	// the sink ever saw them. A producer sending colour, depth and an overlay
+	// back-to-back therefore registered one stream promptly and the others tens
+	// of seconds later, or never -- reversing the send order reversed which one
+	// won, which is what gave it away.
+	//
+	// The sink already keeps the latest frame per (channel, message type) when
+	// it drains, so passing the queue through does not mean unbounded texture
+	// work -- it just stops the connection from throwing away channels before
+	// that dedupe can happen. Set MaxInboundQueueSize explicitly (the server's
+	// own default is 64) to bound it.
+	const int32 SanitizedMaxInboundQueueSize = FMath::Max(MaxInboundQueueSize, 0);
 	const int32 SanitizedMaxOutboundQueueSize =
 		(MaxOutboundQueueSize > 0) ? MaxOutboundQueueSize : 1;
 	Server->DefaultMaxInboundQueueSize = SanitizedMaxInboundQueueSize;
