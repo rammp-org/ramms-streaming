@@ -225,9 +225,15 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 		return;
 	}
 
-	// Support BGRA8, RGBA8 (swizzled to BGRA8), and RGB8 (expanded to BGRA8)
+	// Support BGRA8, RGBA8 (swizzled to BGRA8), and the two three-channel
+	// encodings (expanded to BGRA8). bgr8 is what ROS and OpenCV produce by
+	// default, so a bridge forwarding a sensor_msgs/Image encoding straight
+	// through sends it; without it the frame is dropped and the camera simply
+	// never appears.
 	const bool bIsRGB8 = (Fmt == TEXT("rgb8"));
-	const bool bIsLegacyColor = (Fmt == TEXT("bgra8") || Fmt == TEXT("rgba8") || bIsRGB8);
+	const bool bIsBGR8 = (Fmt == TEXT("bgr8"));
+	const bool bIsThreeChannel = bIsRGB8 || bIsBGR8;
+	const bool bIsLegacyColor = (Fmt == TEXT("bgra8") || Fmt == TEXT("rgba8") || bIsThreeChannel);
 
 	if (!bIsLegacyColor)
 	{
@@ -262,7 +268,7 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 		return;
 	}
 
-	const int32 BytesPerPixel = bIsRGB8 ? 3 : 4;
+	const int32 BytesPerPixel = bIsThreeChannel ? 3 : 4;
 	const int64 ExpectedSize = static_cast<int64>(Width) * static_cast<int64>(Height) * BytesPerPixel;
 	const int64 ConvertedSize = static_cast<int64>(Width) * static_cast<int64>(Height) * 4LL;
 	if (ExpectedSize > MAX_int32 || ConvertedSize > MAX_int32 || Msg.Payload.Num() < ExpectedSize)
@@ -276,19 +282,28 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 	const uint8*  PixelData = Msg.Payload.GetData();
 	TArray<uint8> ConvertedData;
 
-	if (bIsRGB8)
+	if (bIsThreeChannel)
 	{
-		// Expand RGB8 (3 bpp) → BGRA8 (4 bpp)
+		// Expand 3 bpp → BGRA8 (4 bpp). rgb8 arrives R,G,B so its outer
+		// channels swap on the way into BGRA; bgr8 is already in BGRA's order
+		// and only gains an alpha byte.
+		// Keyed off the encoding itself, and asserted, rather than "whatever is
+		// not bgr8": adding a third three-channel format to bIsThreeChannel
+		// without extending this would otherwise inherit one of the two
+		// orderings silently, and a swapped red/blue renders perfectly happily.
+		checkf(bIsRGB8 || bIsBGR8, TEXT("unhandled three-channel format '%s'"), *Fmt);
+		const int32 BlueSrc = bIsRGB8 ? 2 : 0;
+		const int32 RedSrc = bIsRGB8 ? 0 : 2;
 		const int32 NumPixels = Width * Height;
 		ConvertedData.SetNumUninitialized(static_cast<int32>(ConvertedSize));
 		for (int32 i = 0; i < NumPixels; ++i)
 		{
 			const int32 SrcOff = i * 3;
 			const int32 DstOff = i * 4;
-			ConvertedData[DstOff + 0] = PixelData[SrcOff + 2]; // B ← src B
-			ConvertedData[DstOff + 1] = PixelData[SrcOff + 1]; // G ← src G
-			ConvertedData[DstOff + 2] = PixelData[SrcOff + 0]; // R ← src R
-			ConvertedData[DstOff + 3] = 255;				   // A
+			ConvertedData[DstOff + 0] = PixelData[SrcOff + BlueSrc]; // B
+			ConvertedData[DstOff + 1] = PixelData[SrcOff + 1];		 // G
+			ConvertedData[DstOff + 2] = PixelData[SrcOff + RedSrc];	 // R
+			ConvertedData[DstOff + 3] = 255;						 // A
 		}
 		PixelData = ConvertedData.GetData();
 	}

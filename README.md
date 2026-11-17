@@ -445,11 +445,23 @@ textures — BGRA8 for color (`ProcessImageMessage`), R32F or G16 for depth
 **Format normalization:** The `fmt` metadata field is case-insensitive
 (normalized to lowercase on parse), consistent across all `Process*` methods.
 
-**Color format support:** `ProcessImageMessage` accepts `bgra8`, `rgba8`, and
-`rgb8` formats. RGBA8 and RGB8 are converted to BGRA8 on CPU before texture
-creation (GPU does not support `PF_R8G8B8` on D3D11/D3D12). After conversion,
-the broadcast metadata `fmt` is rewritten to `"bgra8"` so downstream consumers
-see the actual texture format.
+**Color format support:** `ProcessImageMessage` accepts `bgra8`, `rgba8`,
+`rgb8` and `bgr8`. The latter three are converted to BGRA8 on CPU before
+texture creation (GPU does not support `PF_R8G8B8` on D3D11/D3D12): `rgba8` is
+swizzled, while the three-channel pair is expanded and gains an alpha byte,
+with `rgb8` swapping its outer channels and `bgr8` already in BGRA's order.
+After conversion, the broadcast metadata `fmt` is rewritten to `"bgra8"` so
+downstream consumers see the actual texture format.
+
+The three-channel encodings are accepted on `ImageData` (0x10) only.
+`ProcessFrameDataMessage` resolves its format through `ResolvePixelFormat`,
+which knows neither `rgb8` nor `bgr8`, so a producer sending colour as
+`FrameData` (0x11) is still rejected. Send colour as `ImageData`.
+
+`bgr8` matters because it is what ROS and OpenCV produce by default, so a
+bridge forwarding a `sensor_msgs/Image` encoding straight through sends it.
+Note that relabelling `bgr8` as `rgb8` is not a workaround: the payload is
+accepted and the image renders with red and blue swapped.
 
 **Depth format support:** `ProcessDepthMessage` supports both `float32`/R32F
 (values in cm) and `16uc1`/G16 (uint16, values in mm). Format is auto-detected
@@ -462,7 +474,7 @@ e.g. R32F and G16 depth.
 **Texture caching:** New textures are only cached in `ChannelTextures` after the
 first successful mip data write, preventing stale entries on creation failure.
 
-**Overflow protection:** Large-frame pixel conversions (RGB8→BGRA8, RGBA8→BGRA8)
+**Overflow protection:** Large-frame pixel conversions (3-channel→BGRA8, RGBA8→BGRA8)
 use `int64` arithmetic for size computations to prevent `int32` overflow on
 large images.
 
