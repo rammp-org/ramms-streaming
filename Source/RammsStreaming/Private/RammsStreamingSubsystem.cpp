@@ -78,25 +78,24 @@ bool URammsStreamingSubsystem::StartServer(int32 Port, int32 MaxClients)
 		MakeUnique<FRammsStreamServer>(static_cast<uint16>(Port), MaxClients);
 
 	// Apply queue size configuration
-	// 0 means unlimited, as MaxInboundQueueSize documents. Sanitising it to 1
-	// gave every connection a one-message inbound ring, and the ring drops the
-	// oldest when full: with several channels arriving between two game-thread
-	// ticks, only the last one sent survived and the rest were discarded before
-	// the sink ever saw them. A producer sending colour, depth and an overlay
-	// back-to-back therefore registered one stream promptly and the others tens
-	// of seconds later, or never -- reversing the send order reversed which one
-	// won, which is what gave it away.
-	//
-	// The sink already keeps the latest frame per (channel, message type) when
-	// it drains, so passing the queue through does not mean unbounded texture
-	// work -- it just stops the connection from throwing away channels before
-	// that dedupe can happen. Set MaxInboundQueueSize explicitly (the server's
-	// own default is 64) to bound it.
+	// Pass the configured size through; 0 means unlimited. It used to be coerced
+	// to 1, which made the ring drop every channel but the last one sent between
+	// two ticks. See MaxInboundQueueSize for why the bound matters either way.
 	const int32 SanitizedMaxInboundQueueSize = FMath::Max(MaxInboundQueueSize, 0);
 	const int32 SanitizedMaxOutboundQueueSize =
 		(MaxOutboundQueueSize > 0) ? MaxOutboundQueueSize : 1;
 	Server->DefaultMaxInboundQueueSize = SanitizedMaxInboundQueueSize;
 	Server->DefaultMaxOutboundQueueSize = SanitizedMaxOutboundQueueSize;
+
+	// Say which sizes are actually in force. They are latched here, so a caller
+	// that sets the property after the server starts -- or that loses the race
+	// to start it at all -- gets no feedback otherwise, and an inbound queue too
+	// small for the channel count fails as "that camera never appears" rather
+	// than as anything resembling a dropped message.
+	UE_LOG(LogRammsStreamSub, Log,
+		TEXT("Stream server queue sizes: inbound %s, outbound %d"),
+		SanitizedMaxInboundQueueSize > 0 ? *FString::FromInt(SanitizedMaxInboundQueueSize) : TEXT("unlimited"),
+		SanitizedMaxOutboundQueueSize);
 
 	// Wire up inbound message delegate
 	Server->OnMessageReceived.BindLambda(

@@ -84,12 +84,23 @@ public:
 
 	// ── Connection queue configuration ──────────────────────────────
 
-	/** Maximum inbound messages queued per connection before oldest are dropped.
-	 *  Applied to new connections when the server accepts them.
-	 *  0 = unlimited (legacy behavior, preserved by default). */
+	/** Maximum inbound messages queued per connection before the oldest are dropped.
+	 *  0 = unlimited.
+	 *
+	 *  This has to exceed the number of channels a producer sends between two
+	 *  game-thread ticks, or those channels starve each other: the ring drops
+	 *  the oldest, so a client sending colour, depth and an overlay back to back
+	 *  would have all but the last discarded before the sink ever saw them. The
+	 *  default leaves plenty of room for that while still bounding memory --
+	 *  unlimited plus a stalled game thread is a multi-GB queue, since nothing
+	 *  here applies backpressure to the recv thread.
+	 *
+	 *  Read once, at StartServer, and copied to each connection as it is
+	 *  accepted: setting it afterwards does not affect the running server or
+	 *  any existing connection. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMS|Streaming",
 		meta = (ClampMin = "0"))
-	int32 MaxInboundQueueSize = 0;
+	int32 MaxInboundQueueSize = 64;
 
 	/** Maximum outbound messages queued per connection. A client is sent the latest frame of each stream (a newer
 	 *  frame takes the place of a queued older one of the same stream), so this bounds how many streams can wait at
