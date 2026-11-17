@@ -78,12 +78,24 @@ bool URammsStreamingSubsystem::StartServer(int32 Port, int32 MaxClients)
 		MakeUnique<FRammsStreamServer>(static_cast<uint16>(Port), MaxClients);
 
 	// Apply queue size configuration
-	const int32 SanitizedMaxInboundQueueSize =
-		(MaxInboundQueueSize > 0) ? MaxInboundQueueSize : 1;
+	// Pass the configured size through; 0 means unlimited. It used to be coerced
+	// to 1, which made the ring drop every channel but the last one sent between
+	// two ticks. See MaxInboundQueueSize for why the bound matters either way.
+	const int32 SanitizedMaxInboundQueueSize = FMath::Max(MaxInboundQueueSize, 0);
 	const int32 SanitizedMaxOutboundQueueSize =
 		(MaxOutboundQueueSize > 0) ? MaxOutboundQueueSize : 1;
 	Server->DefaultMaxInboundQueueSize = SanitizedMaxInboundQueueSize;
 	Server->DefaultMaxOutboundQueueSize = SanitizedMaxOutboundQueueSize;
+
+	// Say which sizes are actually in force. They are latched here, so a caller
+	// that sets the property after the server starts -- or that loses the race
+	// to start it at all -- gets no feedback otherwise, and an inbound queue too
+	// small for the channel count fails as "that camera never appears" rather
+	// than as anything resembling a dropped message.
+	UE_LOG(LogRammsStreamSub, Log,
+		TEXT("Stream server queue sizes: inbound %s, outbound %d"),
+		SanitizedMaxInboundQueueSize > 0 ? *FString::FromInt(SanitizedMaxInboundQueueSize) : TEXT("unlimited"),
+		SanitizedMaxOutboundQueueSize);
 
 	// Wire up inbound message delegate
 	Server->OnMessageReceived.BindLambda(
