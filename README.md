@@ -453,6 +453,11 @@ with `rgb8` swapping its outer channels and `bgr8` already in BGRA's order.
 After conversion, the broadcast metadata `fmt` is rewritten to `"bgra8"` so
 downstream consumers see the actual texture format.
 
+The three-channel encodings are accepted on `ImageData` (0x10) only.
+`ProcessFrameDataMessage` resolves its format through `ResolvePixelFormat`,
+which knows neither `rgb8` nor `bgr8`, so a producer sending colour as
+`FrameData` (0x11) is still rejected. Send colour as `ImageData`.
+
 `bgr8` matters because it is what ROS and OpenCV produce by default, so a
 bridge forwarding a `sensor_msgs/Image` encoding straight through sends it.
 Note that relabelling `bgr8` as `rgb8` is not a workaround: the payload is
@@ -469,7 +474,7 @@ e.g. R32F and G16 depth.
 **Texture caching:** New textures are only cached in `ChannelTextures` after the
 first successful mip data write, preventing stale entries on creation failure.
 
-**Overflow protection:** Large-frame pixel conversions (RGB8→BGRA8, RGBA8→BGRA8)
+**Overflow protection:** Large-frame pixel conversions (3-channel→BGRA8, RGBA8→BGRA8)
 use `int64` arithmetic for size computations to prevent `int32` overflow on
 large images.
 

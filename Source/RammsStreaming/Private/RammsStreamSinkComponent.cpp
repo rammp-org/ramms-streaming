@@ -287,8 +287,13 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 		// Expand 3 bpp → BGRA8 (4 bpp). rgb8 arrives R,G,B so its outer
 		// channels swap on the way into BGRA; bgr8 is already in BGRA's order
 		// and only gains an alpha byte.
-		const int32 BlueSrc = bIsBGR8 ? 0 : 2;
-		const int32 RedSrc = bIsBGR8 ? 2 : 0;
+		// Keyed off the encoding itself, and asserted, rather than "whatever is
+		// not bgr8": adding a third three-channel format to bIsThreeChannel
+		// without extending this would otherwise inherit one of the two
+		// orderings silently, and a swapped red/blue renders perfectly happily.
+		checkf(bIsRGB8 || bIsBGR8, TEXT("unhandled three-channel format '%s'"), *Fmt);
+		const int32 BlueSrc = bIsRGB8 ? 2 : 0;
+		const int32 RedSrc = bIsRGB8 ? 0 : 2;
 		const int32 NumPixels = Width * Height;
 		ConvertedData.SetNumUninitialized(static_cast<int32>(ConvertedSize));
 		for (int32 i = 0; i < NumPixels; ++i)
