@@ -143,6 +143,30 @@ int32 URammsStreamingSubsystem::GetConnectionCount() const
 	return Server.IsValid() ? Server->GetConnectionCount() : 0;
 }
 
+FRammsStreamStats URammsStreamingSubsystem::GetStreamStats() const
+{
+	FRammsStreamStats Out;
+	if (!Server.IsValid())
+	{
+		return Out;
+	}
+
+	// The counters are unsigned and Blueprint's integers are signed, so each is clamped on the way
+	// out. That is not overflow protection: a counter wraps in its own uint64 upstream of this,
+	// and the clamp only keeps the readout from going negative when it does. At 64 bits that is
+	// not reachable in any run that matters -- it was, at the uint32 these started as.
+	const FRammsStreamServer::FStats& Stats = Server->GetStats();
+	Out.bServerRunning = true;
+	Out.FramesReceived = static_cast<int64>(FMath::Min<uint64>(Stats.FramesReceived.Load(), MAX_int64));
+	Out.MessagesReceived = static_cast<int64>(FMath::Min<uint64>(Stats.MessagesReceived.Load(), MAX_int64));
+	Out.TotalBytesReceived = static_cast<int64>(FMath::Min<uint64>(Stats.TotalBytesReceived.Load(), MAX_int64));
+	Out.FramesSent = static_cast<int32>(FMath::Min<uint32>(Stats.FramesSent.Load(), MAX_int32));
+	Out.TotalBytesSent = static_cast<int64>(FMath::Min<uint64>(Stats.TotalBytesSent.Load(), MAX_int64));
+	Out.FramesDropped = static_cast<int32>(FMath::Min<uint32>(Stats.FramesDropped.Load(), MAX_int32));
+	Out.ConnectionsAccepted = static_cast<int32>(FMath::Min<uint32>(Stats.TotalConnectionsAccepted.Load(), MAX_int32));
+	return Out;
+}
+
 int32 URammsStreamingSubsystem::GetServerPort() const
 {
 	return Server.IsValid() ? Server->GetPort() : 0;

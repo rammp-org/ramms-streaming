@@ -126,7 +126,19 @@ void URammsStreamSinkComponent::OnNativeStreamMessage(
 
 	const int32 Channel = static_cast<int32>(Msg.Header.ChannelID);
 	if (ListenChannels.Num() > 0 && !ListenChannels.Contains(Channel))
+	{
+		// Says why a frame the server logged as dispatched never reaches this sink. Without it,
+		// a channel the producer renumbered looks identical to a producer that stopped sending.
+		UE_LOG(LogRammsStreamSink, Verbose,
+			TEXT("[%s] frame on channel %d ignored: not in ListenChannels"),
+			*GetReadableName(), Channel);
 		return;
+	}
+
+	UE_LOG(LogRammsStreamSink, Verbose,
+		TEXT("[%s] received frame: channel %d, type 0x%02X, %d byte(s)"),
+		*GetReadableName(), Channel,
+		static_cast<uint8>(Msg.Header.MessageType), Msg.Header.PayloadLen);
 
 	// Queue for processing in TickComponent
 	FScopeLock Lock(&PendingLock);
@@ -167,6 +179,20 @@ void URammsStreamSinkComponent::TickComponent(
 		LatestIndices.Add(Pair.Value);
 	}
 	LatestIndices.Sort();
+
+	// Coalescing is the other reason a frame that arrived never shows. Usually it is a producer
+	// outrunning the frame rate, which is by design -- but the key above is (channel, type) only,
+	// with no stream identity in it, so two DIFFERENT streams sent on one channel with the same
+	// message type also collide here and one of them is discarded every tick. Both look the same
+	// from inside this function, so the log names the key and leaves the cause open rather than
+	// asserting the benign one and sending the reader off after a producer that is behaving.
+	if (ToProcess.Num() > LatestIndices.Num())
+	{
+		UE_LOG(LogRammsStreamSink, Verbose,
+			TEXT("[%s] %d frame(s) queued this tick, %d dispatched; the rest share a (channel, ")
+				TEXT("type) key with a newer one -- a fast producer, or two streams on one channel"),
+			*GetReadableName(), ToProcess.Num(), LatestIndices.Num());
+	}
 
 	for (const int32 Idx : LatestIndices)
 	{

@@ -15,6 +15,51 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRammsStreamMessage, int32,
 	MessageType);
 
 /**
+ * The server's counters, for a HUD or a soak test.
+ *
+ * Each field is read atomically, but the fields are read one after another while other threads
+ * are still writing, so this is six readings taken in quick succession rather than one instant.
+ * Counts are reliable; a ratio derived from two of them can be momentarily off.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSSTREAMING_API FRammsStreamStats
+{
+	GENERATED_BODY()
+
+	/**
+	 * Inbound messages carrying data rather than control. THE one to watch for "is the robot
+	 * sending frames?": MessagesReceived below counts Subscribe and Ping keepalives too, so a
+	 * client that connects and then only pings drives that up forever while nothing arrives.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int64 FramesReceived = 0;
+
+	/** Every inbound message, control traffic included. Socket activity, not frames. */
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int64 MessagesReceived = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int64 TotalBytesReceived = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int32 FramesSent = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int64 TotalBytesSent = 0;
+
+	/** Outbound frames dropped because a subscriber could not keep up. */
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int32 FramesDropped = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int32 ConnectionsAccepted = 0;
+
+	/** False when the server is not running, in which case every count above is zero. */
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	bool bServerRunning = false;
+};
+
+/**
  * Game-instance subsystem that owns the RMSS streaming server.
  *
  * Persists across level transitions. Provides Blueprint-accessible API
@@ -45,6 +90,16 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	int32 GetConnectionCount() const;
+
+	/**
+	 * The server's counters. Zeroed, with bServerRunning false, when it is not running.
+	 *
+	 * FramesReceived answers what a log cannot at frame rate: whether frames are arriving at all.
+	 * A connection count above zero only says a client is attached, not that it is sending, and
+	 * MessagesReceived cannot tell the two apart either because keepalives raise it.
+	 */
+	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
+	FRammsStreamStats GetStreamStats() const;
 
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	int32 GetServerPort() const;

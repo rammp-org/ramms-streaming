@@ -452,6 +452,14 @@ void FRammsStreamServer::Tick()
 	// Dispatch
 	for (auto& [ConnId, Msg] : InboundMessages)
 	{
+		// Counted here rather than per batch, so the totals are of messages actually dispatched.
+		// Control opcodes start at MetadataOnly (0xF0); everything below it carries data.
+		++Stats.MessagesReceived;
+		if (static_cast<uint8>(Msg.Header.MessageType) < static_cast<uint8>(ERammsStreamMessageType::MetadataOnly))
+		{
+			++Stats.FramesReceived;
+		}
+
 		UE_LOG(
 			LogRammsStream, Verbose,
 			TEXT("RMSS: Dispatching msg type=0x%02X ch=%d payload=%d from conn %u"),

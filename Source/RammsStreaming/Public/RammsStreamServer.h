@@ -100,6 +100,19 @@ public:
 		TAtomic<uint32> FramesSent{ 0 };
 		TAtomic<uint32> FramesDropped{ 0 };
 		TAtomic<uint32> TotalConnectionsAccepted{ 0 };
+
+		/** Every inbound message dispatched to the game, control traffic included. */
+		TAtomic<uint64> MessagesReceived{ 0 };
+
+		/**
+		 * Inbound messages carrying data rather than control (opcodes below MetadataOnly).
+		 *
+		 * This is the one that answers "is the robot sending frames?". MessagesReceived cannot:
+		 * a client that subscribes and then only sends Ping keepalives drives it up forever
+		 * while no frame ever arrives, which is the confusion this counter exists to remove.
+		 * Bytes cannot either -- they move for control traffic too.
+		 */
+		TAtomic<uint64> FramesReceived{ 0 };
 	};
 	const FStats& GetStats() const { return Stats; }
 

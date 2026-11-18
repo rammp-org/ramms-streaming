@@ -367,6 +367,13 @@ bool FRammsStreamingSubscriptions::RunTest(const FString& Parameters)
 	TestTrue(TEXT("bytes sent are counted"), Server.GetStats().TotalBytesSent.Load() > 0);
 	TestTrue(TEXT("bytes received are counted"), Server.GetStats().TotalBytesReceived.Load() > 0);
 
+	// This run subscribes, unsubscribes and pings, and never sends an inbound FRAME: the two
+	// counters have to disagree, or FramesReceived is counting control traffic and a client that
+	// only keeps its connection alive would read as a robot streaming.
+	TestTrue(TEXT("inbound control messages are counted"), Server.GetStats().MessagesReceived.Load() > 0);
+	TestEqual(TEXT("control messages are not counted as frames"),
+		static_cast<int32>(Server.GetStats().FramesReceived.Load()), 0);
+
 	Server.StopListening();
 	CloseClient(Sender);
 	CloseClient(Viewer);
