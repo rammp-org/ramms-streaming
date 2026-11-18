@@ -450,6 +450,7 @@ void FRammsStreamServer::Tick()
 	}
 
 	// Dispatch
+	Stats.MessagesReceived += static_cast<uint32>(InboundMessages.Num());
 	for (auto& [ConnId, Msg] : InboundMessages)
 	{
 		UE_LOG(

@@ -126,7 +126,19 @@ void URammsStreamSinkComponent::OnNativeStreamMessage(
 
 	const int32 Channel = static_cast<int32>(Msg.Header.ChannelID);
 	if (ListenChannels.Num() > 0 && !ListenChannels.Contains(Channel))
+	{
+		// Says why a frame the server logged as dispatched never reaches this sink. Without it,
+		// a channel the producer renumbered looks identical to a producer that stopped sending.
+		UE_LOG(LogRammsStreamSink, Verbose,
+			TEXT("[%s] frame on channel %d ignored: not in ListenChannels"),
+			*GetReadableName(), Channel);
 		return;
+	}
+
+	UE_LOG(LogRammsStreamSink, Verbose,
+		TEXT("[%s] received frame: channel %d, type 0x%02X, %d byte(s)"),
+		*GetReadableName(), Channel,
+		static_cast<uint8>(Msg.Header.MessageType), Msg.Header.PayloadLen);
 
 	// Queue for processing in TickComponent
 	FScopeLock Lock(&PendingLock);
@@ -167,6 +179,15 @@ void URammsStreamSinkComponent::TickComponent(
 		LatestIndices.Add(Pair.Value);
 	}
 	LatestIndices.Sort();
+
+	// Coalescing is the other reason a frame that arrived never shows: a producer faster than
+	// the frame rate has all but its newest frame per (channel, type) dropped here, by design.
+	if (ToProcess.Num() > LatestIndices.Num())
+	{
+		UE_LOG(LogRammsStreamSink, Verbose,
+			TEXT("[%s] %d frame(s) queued this tick, %d shown; the rest were superseded"),
+			*GetReadableName(), ToProcess.Num(), LatestIndices.Num());
+	}
 
 	for (const int32 Idx : LatestIndices)
 	{

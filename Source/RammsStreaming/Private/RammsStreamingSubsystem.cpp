@@ -143,6 +143,28 @@ int32 URammsStreamingSubsystem::GetConnectionCount() const
 	return Server.IsValid() ? Server->GetConnectionCount() : 0;
 }
 
+FRammsStreamStats URammsStreamingSubsystem::GetStreamStats() const
+{
+	FRammsStreamStats Out;
+	if (!Server.IsValid())
+	{
+		return Out;
+	}
+
+	// Counters are 32/64-bit unsigned and Blueprint has no unsigned types; a run long enough to
+	// overflow a signed count has bigger problems than a wrapped readout, so this clamps rather
+	// than wraps, leaving a stuck maximum as the visible symptom.
+	const FRammsStreamServer::FStats& Stats = Server->GetStats();
+	Out.bServerRunning = true;
+	Out.MessagesReceived = static_cast<int32>(FMath::Min<uint32>(Stats.MessagesReceived.Load(), MAX_int32));
+	Out.TotalBytesReceived = static_cast<int64>(FMath::Min<uint64>(Stats.TotalBytesReceived.Load(), MAX_int64));
+	Out.FramesSent = static_cast<int32>(FMath::Min<uint32>(Stats.FramesSent.Load(), MAX_int32));
+	Out.TotalBytesSent = static_cast<int64>(FMath::Min<uint64>(Stats.TotalBytesSent.Load(), MAX_int64));
+	Out.FramesDropped = static_cast<int32>(FMath::Min<uint32>(Stats.FramesDropped.Load(), MAX_int32));
+	Out.ConnectionsAccepted = static_cast<int32>(FMath::Min<uint32>(Stats.TotalConnectionsAccepted.Load(), MAX_int32));
+	return Out;
+}
+
 int32 URammsStreamingSubsystem::GetServerPort() const
 {
 	return Server.IsValid() ? Server->GetPort() : 0;

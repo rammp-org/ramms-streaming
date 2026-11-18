@@ -100,6 +100,11 @@ public:
 		TAtomic<uint32> FramesSent{ 0 };
 		TAtomic<uint32> FramesDropped{ 0 };
 		TAtomic<uint32> TotalConnectionsAccepted{ 0 };
+
+		/** Inbound messages dispatched to the game. Bytes alone cannot answer "is anything
+		 *  arriving": a producer that connects and sends nothing, and one sending frames that
+		 *  every sink filters out, both leave the byte count moving or still for other reasons. */
+		TAtomic<uint32> MessagesReceived{ 0 };
 	};
 	const FStats& GetStats() const { return Stats; }
 

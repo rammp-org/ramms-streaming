@@ -15,6 +15,42 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRammsStreamMessage, int32,
 	MessageType);
 
 /**
+ * A snapshot of the server's counters, for a HUD or a soak test.
+ *
+ * The server keeps these as atomics, which a USTRUCT cannot hold, so this is a plain copy
+ * taken at the moment it is asked for rather than a live view.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSSTREAMING_API FRammsStreamStats
+{
+	GENERATED_BODY()
+
+	/** Inbound messages handed to the game. The one to watch for "is the robot sending?". */
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int32 MessagesReceived = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int64 TotalBytesReceived = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int32 FramesSent = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int64 TotalBytesSent = 0;
+
+	/** Outbound frames dropped because a subscriber could not keep up. */
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int32 FramesDropped = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int32 ConnectionsAccepted = 0;
+
+	/** False when the server is not running, in which case every count above is zero. */
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	bool bServerRunning = false;
+};
+
+/**
  * Game-instance subsystem that owns the RMSS streaming server.
  *
  * Persists across level transitions. Provides Blueprint-accessible API
@@ -45,6 +81,15 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	int32 GetConnectionCount() const;
+
+	/**
+	 * The server's counters. Zeroed, with bServerRunning false, when it is not running.
+	 *
+	 * MessagesReceived answers what a log cannot at frame rate: whether anything is arriving at
+	 * all. A connection count above zero only says a client is attached, not that it is sending.
+	 */
+	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
+	FRammsStreamStats GetStreamStats() const;
 
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	int32 GetServerPort() const;
