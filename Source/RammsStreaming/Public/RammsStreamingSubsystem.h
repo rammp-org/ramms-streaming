@@ -15,19 +15,28 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRammsStreamMessage, int32,
 	MessageType);
 
 /**
- * A snapshot of the server's counters, for a HUD or a soak test.
+ * The server's counters, for a HUD or a soak test.
  *
- * The server keeps these as atomics, which a USTRUCT cannot hold, so this is a plain copy
- * taken at the moment it is asked for rather than a live view.
+ * Each field is read atomically, but the fields are read one after another while other threads
+ * are still writing, so this is six readings taken in quick succession rather than one instant.
+ * Counts are reliable; a ratio derived from two of them can be momentarily off.
  */
 USTRUCT(BlueprintType)
 struct RAMMSSTREAMING_API FRammsStreamStats
 {
 	GENERATED_BODY()
 
-	/** Inbound messages handed to the game. The one to watch for "is the robot sending?". */
+	/**
+	 * Inbound messages carrying data rather than control. THE one to watch for "is the robot
+	 * sending frames?": MessagesReceived below counts Subscribe and Ping keepalives too, so a
+	 * client that connects and then only pings drives that up forever while nothing arrives.
+	 */
 	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
-	int32 MessagesReceived = 0;
+	int64 FramesReceived = 0;
+
+	/** Every inbound message, control traffic included. Socket activity, not frames. */
+	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
+	int64 MessagesReceived = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "RAMMS|Streaming")
 	int64 TotalBytesReceived = 0;
@@ -85,8 +94,9 @@ public:
 	/**
 	 * The server's counters. Zeroed, with bServerRunning false, when it is not running.
 	 *
-	 * MessagesReceived answers what a log cannot at frame rate: whether anything is arriving at
-	 * all. A connection count above zero only says a client is attached, not that it is sending.
+	 * FramesReceived answers what a log cannot at frame rate: whether frames are arriving at all.
+	 * A connection count above zero only says a client is attached, not that it is sending, and
+	 * MessagesReceived cannot tell the two apart either because keepalives raise it.
 	 */
 	UFUNCTION(BlueprintPure, Category = "RAMMS|Streaming")
 	FRammsStreamStats GetStreamStats() const;

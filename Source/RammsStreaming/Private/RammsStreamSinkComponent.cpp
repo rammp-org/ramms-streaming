@@ -180,12 +180,17 @@ void URammsStreamSinkComponent::TickComponent(
 	}
 	LatestIndices.Sort();
 
-	// Coalescing is the other reason a frame that arrived never shows: a producer faster than
-	// the frame rate has all but its newest frame per (channel, type) dropped here, by design.
+	// Coalescing is the other reason a frame that arrived never shows. Usually it is a producer
+	// outrunning the frame rate, which is by design -- but the key above is (channel, type) only,
+	// with no stream identity in it, so two DIFFERENT streams sent on one channel with the same
+	// message type also collide here and one of them is discarded every tick. Both look the same
+	// from inside this function, so the log names the key and leaves the cause open rather than
+	// asserting the benign one and sending the reader off after a producer that is behaving.
 	if (ToProcess.Num() > LatestIndices.Num())
 	{
 		UE_LOG(LogRammsStreamSink, Verbose,
-			TEXT("[%s] %d frame(s) queued this tick, %d shown; the rest were superseded"),
+			TEXT("[%s] %d frame(s) queued this tick, %d dispatched; the rest share a (channel, ")
+				TEXT("type) key with a newer one -- a fast producer, or two streams on one channel"),
 			*GetReadableName(), ToProcess.Num(), LatestIndices.Num());
 	}
 

@@ -151,12 +151,14 @@ FRammsStreamStats URammsStreamingSubsystem::GetStreamStats() const
 		return Out;
 	}
 
-	// Counters are 32/64-bit unsigned and Blueprint has no unsigned types; a run long enough to
-	// overflow a signed count has bigger problems than a wrapped readout, so this clamps rather
-	// than wraps, leaving a stuck maximum as the visible symptom.
+	// The counters are unsigned and Blueprint's integers are signed, so each is clamped on the way
+	// out. That is not overflow protection: a counter wraps in its own uint64 upstream of this,
+	// and the clamp only keeps the readout from going negative when it does. At 64 bits that is
+	// not reachable in any run that matters -- it was, at the uint32 these started as.
 	const FRammsStreamServer::FStats& Stats = Server->GetStats();
 	Out.bServerRunning = true;
-	Out.MessagesReceived = static_cast<int32>(FMath::Min<uint32>(Stats.MessagesReceived.Load(), MAX_int32));
+	Out.FramesReceived = static_cast<int64>(FMath::Min<uint64>(Stats.FramesReceived.Load(), MAX_int64));
+	Out.MessagesReceived = static_cast<int64>(FMath::Min<uint64>(Stats.MessagesReceived.Load(), MAX_int64));
 	Out.TotalBytesReceived = static_cast<int64>(FMath::Min<uint64>(Stats.TotalBytesReceived.Load(), MAX_int64));
 	Out.FramesSent = static_cast<int32>(FMath::Min<uint32>(Stats.FramesSent.Load(), MAX_int32));
 	Out.TotalBytesSent = static_cast<int64>(FMath::Min<uint64>(Stats.TotalBytesSent.Load(), MAX_int64));
