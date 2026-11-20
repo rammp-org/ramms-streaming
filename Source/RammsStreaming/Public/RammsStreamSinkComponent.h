@@ -4,6 +4,7 @@
 
 #include "Components/ActorComponent.h"
 #include "CoreMinimal.h"
+#include "Engine/TextureDefines.h"
 #include "PixelFormat.h"
 #include "RammsStreamProtocol.h"
 #include "RammsStreamSinkComponent.generated.h"
@@ -101,7 +102,7 @@ private:
 	UTexture2D* UpdateDepthTexture16(int32 ChannelID, const uint8* Data,
 		int32 Width, int32 Height);
 
-	/** Create or update a UTexture2D with an arbitrary pixel format. */
+	/** Create or update a UTexture2D with an arbitrary pixel format. Filter: TF_Nearest for masks (class ids). */
 	UTexture2D* UpdateGenericTexture(int32 ChannelID, const uint8* Data,
-		int32 Width, int32 Height, EPixelFormat Format, bool bIsSRGB);
+		int32 Width, int32 Height, EPixelFormat Format, bool bIsSRGB, TextureFilter Filter = TF_Bilinear);
 };

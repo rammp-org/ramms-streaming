@@ -284,9 +284,12 @@ void URammsStreamSinkComponent::ProcessImageMessage(
 			return;
 		}
 
+		// Masks (class ids) are sampled nearest here too; see ProcessFrameDataMessage.
+		FString		Role;
+		const bool	bIsMask = Meta->TryGetStringField(TEXT("role"), Role) && Role.Equals(TEXT("mask"), ESearchCase::IgnoreCase);
 		UTexture2D* Tex = UpdateGenericTexture(
 			Channel, Msg.Payload.GetData(), Width, Height,
-			FormatInfo.Format, FormatInfo.bSRGB);
+			FormatInfo.Format, FormatInfo.bSRGB, bIsMask ? TF_Nearest : TF_Bilinear);
 		if (Tex)
 		{
 			OnFrameReceived.Broadcast(Channel, Tex, MetaStr, Msg.Header.MessageType);
@@ -733,9 +736,15 @@ void URammsStreamSinkComponent::ProcessFrameDataMessage(
 		return;
 	}
 
+	// A mask holds class ids, not intensities: filtering blends two neighbouring ids into a third that
+	// belongs to neither, and a mask material colours it as that third class -- a fringe of a colour that
+	// is nowhere in the scene along every boundary. Masks are sampled nearest.
+	FString	   Role;
+	const bool bIsMask = Meta->TryGetStringField(TEXT("role"), Role) && Role.Equals(TEXT("mask"), ESearchCase::IgnoreCase);
+
 	UTexture2D* Tex = UpdateGenericTexture(
 		Channel, Msg.Payload.GetData(), Width, Height,
-		FormatInfo.Format, FormatInfo.bSRGB);
+		FormatInfo.Format, FormatInfo.bSRGB, bIsMask ? TF_Nearest : TF_Bilinear);
 	if (Tex)
 	{
 		OnFrameReceived.Broadcast(Channel, Tex, MetaStr, Msg.Header.MessageType);
@@ -744,7 +753,7 @@ void URammsStreamSinkComponent::ProcessFrameDataMessage(
 
 UTexture2D* URammsStreamSinkComponent::UpdateGenericTexture(int32 ChannelID,
 	const uint8* Data, int32 Width, int32 Height,
-	EPixelFormat Format, bool bIsSRGB)
+	EPixelFormat Format, bool bIsSRGB, TextureFilter Filter)
 {
 	UTexture2D** Existing = ChannelTextures.Find(ChannelID);
 	UTexture2D*	 Tex = Existing ? *Existing : nullptr;
@@ -761,11 +770,12 @@ UTexture2D* URammsStreamSinkComponent::UpdateGenericTexture(int32 ChannelID,
 			return nullptr;
 		}
 		Tex->SRGB = bIsSRGB;
-		Tex->Filter = TF_Bilinear;
 		Tex->AddressX = TA_Clamp;
 		Tex->AddressY = TA_Clamp;
 		ChannelTextures.Add(ChannelID, Tex);
 	}
+	// Every frame, before the UpdateResource below: a channel can change what it carries.
+	Tex->Filter = Filter;
 
 	const int64 BytesPerPixel = static_cast<int64>(GPixelFormats[Format].BlockBytes);
 	const int64 ByteCount =
